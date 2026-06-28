@@ -26,7 +26,7 @@ The agent will walk you through it. Takes about 1 minute.
 - **Homepages group** pulls Gmail inbox, X home, YouTube, LinkedIn, GitHub homepages into one card
 - **Close tabs with style** with swoosh sound + confetti burst
 - **Duplicate detection** flags when you have the same page open twice, with one-click cleanup
-- **Tab status indicators** show active/background and high-memory states with compact hoverable bars
+- **Tab status indicators** show active/background/sleeping states with compact hoverable bars
 - **Click any tab to jump to it** across windows, no new tab opened
 - **Save for later** bookmark tabs to a checklist before closing them
 - **Localhost grouping** shows port numbers next to each tab so you can tell your vibe coding projects apart
@@ -70,8 +70,6 @@ You open a new tab
 
 Everything runs inside the Chrome extension. No external server, no API calls, no data sent anywhere. Saved tabs are stored in `chrome.storage.local`.
 
-High-memory badges use Chrome's local `chrome.processes` API when available. Values are process-level estimates, so a shared renderer process can be associated with more than one tab.
-
 ---
 
 ## Tech stack
@@ -80,7 +78,7 @@ High-memory badges use Chrome's local `chrome.processes` API when available. Val
 |------|-----|
 | Extension | Chrome Manifest V3 |
 | Storage | chrome.storage.local |
-| Memory estimates | chrome.processes |
+| System memory snapshot | chrome.system.memory |
 | Sound | Web Audio API (synthesized, no files) |
 | Animations | CSS transitions + JS confetti particles |
 

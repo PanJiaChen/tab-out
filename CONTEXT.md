@@ -16,6 +16,10 @@ _Avoid_: unactive tab, inactive tab
 A tab whose page contents have been released from memory by Chrome and will reload when selected again.
 _Avoid_: unactive tab, inactive tab, closed tab
 
-**High Memory Tab**:
-A tab whose associated Chrome process memory estimate crosses the product's cleanup threshold.
-_Avoid_: memory leak, heavy page, high JS heap
+**Frozen Tab**:
+A tab whose page contents remain in memory, but Chrome has paused task execution to reduce background work.
+_Avoid_: sleeping tab, discarded tab, closed tab
+
+**System Memory Snapshot**:
+A point-in-time reading of device-wide physical memory from `chrome.system.memory.getInfo()`, including total and available capacity. It is not Chrome's own memory usage.
+_Avoid_: Chrome memory, browser memory, tab memory

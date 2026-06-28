@@ -26,97 +26,62 @@
 // All open tabs — populated by fetchOpenTabs()
 let openTabs = [];
 
-const HIGH_MEMORY_THRESHOLD_BYTES = 500 * 1024 * 1024;
-
-function hasProcessesApi() {
+function hasSystemMemoryApi() {
   return (
     typeof chrome !== 'undefined' &&
-    chrome.processes &&
-    typeof chrome.processes.getProcessIdForTab === 'function' &&
-    typeof chrome.processes.getProcessInfo === 'function'
+    chrome.system &&
+    chrome.system.memory &&
+    typeof chrome.system.memory.getInfo === 'function'
   );
 }
 
-async function getProcessIdForTab(tabId) {
-  try {
-    const processId = await chrome.processes.getProcessIdForTab(tabId);
-    return typeof processId === 'number' ? processId : null;
-  } catch {
+async function getSystemMemoryInfo() {
+  if (!hasSystemMemoryApi()) return null;
+
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = info => {
+      if (settled) return;
+      settled = true;
+      resolve(info || null);
+    };
+
+    setTimeout(() => finish(null), 1500);
+
+    try {
+      const maybePromise = chrome.system.memory.getInfo(finish);
+      if (maybePromise && typeof maybePromise.then === 'function') {
+        maybePromise.then(finish).catch(() => finish(null));
+      }
+    } catch {
+      try {
+        const maybePromise = chrome.system.memory.getInfo();
+        if (maybePromise && typeof maybePromise.then === 'function') {
+          maybePromise.then(finish).catch(() => finish(null));
+          return;
+        }
+      } catch {}
+      finish(null);
+    }
+  });
+}
+
+function normalizeSystemMemoryInfo(info) {
+  if (!info) return null;
+
+  const capacity = Number(info.capacity);
+  const availableCapacity = Number(info.availableCapacity);
+  if (!Number.isFinite(capacity) || !Number.isFinite(availableCapacity) || capacity <= 0) {
     return null;
   }
-}
 
-async function getProcessInfo(processIds) {
-  try {
-    return await chrome.processes.getProcessInfo(processIds, true) || {};
-  } catch {
-    return {};
-  }
-}
-
-function getProcessMemoryBytes(processInfo) {
-  const bytes = processInfo && processInfo.privateMemory;
-  return Number.isFinite(bytes) && bytes > 0 ? bytes : null;
-}
-
-function getProcessTabCount(processInfo, fallbackCount) {
-  const tabIds = new Set();
-  if (Array.isArray(processInfo && processInfo.tabs)) {
-    for (const tabId of processInfo.tabs) tabIds.add(tabId);
-  }
-  if (Array.isArray(processInfo && processInfo.tasks)) {
-    for (const task of processInfo.tasks) {
-      if (typeof task.tabId === 'number') tabIds.add(task.tabId);
-    }
-  }
-  return tabIds.size || fallbackCount || 1;
-}
-
-async function attachProcessMemoryEstimates(tabs) {
-  if (!hasProcessesApi()) return;
-
-  const candidates = tabs.filter(tab =>
-    typeof tab.id === 'number' &&
-    tab.url &&
-    !tab.discarded &&
-    !tab.url.startsWith('chrome://') &&
-    !tab.url.startsWith('chrome-extension://') &&
-    !tab.url.startsWith('about:')
-  );
-  if (candidates.length === 0) return;
-
-  const tabProcessPairs = await Promise.all(candidates.map(async tab => ({
-    tabId: tab.id,
-    processId: await getProcessIdForTab(tab.id),
-  })));
-
-  const processIds = [...new Set(tabProcessPairs
-    .map(pair => pair.processId)
-    .filter(processId => typeof processId === 'number'))];
-  if (processIds.length === 0) return;
-
-  const processInfos = await getProcessInfo(processIds);
-  const tabById = new Map(tabs.map(tab => [tab.id, tab]));
-  const fallbackCountsByProcess = new Map();
-  for (const { processId } of tabProcessPairs) {
-    if (typeof processId !== 'number') continue;
-    fallbackCountsByProcess.set(processId, (fallbackCountsByProcess.get(processId) || 0) + 1);
-  }
-
-  for (const { tabId, processId } of tabProcessPairs) {
-    if (typeof processId !== 'number') continue;
-    const tab = tabById.get(tabId);
-    const processInfo = processInfos[String(processId)] || processInfos[processId];
-    const bytes = getProcessMemoryBytes(processInfo);
-    if (!tab || !bytes) continue;
-
-    tab.memory = {
-      bytes,
-      processId,
-      sharedTabCount: getProcessTabCount(processInfo, fallbackCountsByProcess.get(processId)),
-      isHigh: bytes >= HIGH_MEMORY_THRESHOLD_BYTES,
-    };
-  }
+  const usedCapacity = Math.max(capacity - availableCapacity, 0);
+  return {
+    capacity,
+    availableCapacity,
+    usedCapacity,
+    usedPercent: Math.min((usedCapacity / capacity) * 100, 100),
+  };
 }
 
 /**
@@ -144,8 +109,6 @@ async function fetchOpenTabs() {
       // Flag Tab Out's own pages so we can detect duplicate new tabs
       isTabOut: t.url === newtabUrl || t.url === 'chrome://newtab/',
     }));
-
-    await attachProcessMemoryEstimates(openTabs);
   } catch {
     // chrome.tabs API unavailable (shouldn't happen in an extension page)
     openTabs = [];
@@ -870,31 +833,73 @@ function formatMemory(bytes) {
   return `${Math.round(mb)} MB`;
 }
 
+function renderSystemMemoryStat(label, value, detail = '') {
+  return `
+    <div class="system-memory-stat">
+      <div class="system-memory-label">${escapeHtml(label)}</div>
+      <div class="system-memory-value">${escapeHtml(value)}</div>
+      ${detail ? `<div class="system-memory-detail">${escapeHtml(detail)}</div>` : ''}
+    </div>`;
+}
+
+function renderSystemMemoryUnavailable(message) {
+  const statsEl = document.getElementById('systemMemoryStats');
+  const usageEl = document.getElementById('systemMemoryUsage');
+  if (usageEl) usageEl.textContent = '';
+  if (statsEl) {
+    statsEl.innerHTML = `
+      <div class="system-memory-status">
+        ${escapeHtml(message)}
+      </div>`;
+  }
+}
+
+async function renderSystemMemoryPanel() {
+  const panel = document.getElementById('systemMemoryPanel');
+  const statsEl = document.getElementById('systemMemoryStats');
+  const usageEl = document.getElementById('systemMemoryUsage');
+  if (!panel || !statsEl) return;
+
+  statsEl.innerHTML = '<div class="system-memory-loading">Loading memory snapshot...</div>';
+  if (usageEl) usageEl.textContent = '';
+
+  if (!hasSystemMemoryApi()) {
+    renderSystemMemoryUnavailable('chrome.system.memory is unavailable in this context.');
+    return;
+  }
+
+  const rawInfo = await getSystemMemoryInfo();
+  const snapshot = normalizeSystemMemoryInfo(rawInfo);
+  if (!snapshot) {
+    renderSystemMemoryUnavailable('Could not read system memory snapshot.');
+    return;
+  }
+
+  if (usageEl) usageEl.textContent = `${snapshot.usedPercent.toFixed(1)}% used`;
+  statsEl.innerHTML = [
+    renderSystemMemoryStat('Used', formatMemory(snapshot.usedCapacity)),
+    renderSystemMemoryStat('Available', formatMemory(snapshot.availableCapacity)),
+    renderSystemMemoryStat('Total', formatMemory(snapshot.capacity)),
+  ].join('');
+}
+
 function getTabStateTone(tab) {
-  if (tab.memory && tab.memory.isHigh) return 'high-memory';
+  if (tab.discarded) return 'sleeping';
+  if (tab.frozen) return 'frozen';
   return tab.active ? 'active' : 'background';
 }
 
 function getTabStateTitle(tab) {
-  const states = [
-    tab.active
-      ? 'Active tab: selected in its Chrome window'
-      : 'Background tab: open but not selected in its Chrome window',
-  ];
   if (tab.discarded) {
-    states.push('Sleeping: Chrome has released this tab from memory');
+    return 'Sleeping tab: Chrome has released this tab from memory. It will reload when selected.';
   }
   if (tab.frozen) {
-    states.push('Frozen: Chrome has frozen this tab to reduce work');
+    return 'Frozen tab: Chrome has paused this tab to reduce work.';
   }
-  if (tab.memory && tab.memory.isHigh) {
-    const memoryLabel = formatMemory(tab.memory.bytes);
-    const sharedText = tab.memory.sharedTabCount > 1
-      ? ` process estimate shared by ${tab.memory.sharedTabCount} tabs`
-      : ' process-level estimate';
-    states.push(`High memory: ${memoryLabel}, ${sharedText}`);
+  if (tab.active) {
+    return 'Active tab: selected in its Chrome window';
   }
-  return states.join(' | ');
+  return 'Background tab: open but not selected in its Chrome window';
 }
 
 function renderTabStateBar(tab) {
@@ -919,7 +924,6 @@ function renderTabChip(tab, groupDomain, urlCounts = {}) {
     count > 1 ? 'chip-has-dupes' : '',
     tab.active ? 'is-active-tab' : '',
     tab.discarded ? 'is-sleeping-tab' : '',
-    tab.memory && tab.memory.isHigh ? 'is-high-memory-tab' : '',
   ].filter(Boolean).join(' ');
   const safeUrl   = escapeHtml(tab.url || '');
   const safeTitle = escapeHtml(label);
@@ -1305,6 +1309,9 @@ async function renderStaticDashboard() {
   const statTabs = document.getElementById('statTabs');
   if (statTabs) statTabs.textContent = openTabs.length;
 
+  // --- System memory snapshot ---
+  await renderSystemMemoryPanel();
+
   // --- Check for duplicate Tab Out tabs ---
   checkTabOutDupes();
 
@@ -1343,6 +1350,12 @@ document.addEventListener('click', async (e) => {
       setTimeout(() => { banner.style.display = 'none'; banner.style.opacity = '1'; }, 400);
     }
     showToast('Closed extra Tab Out tabs');
+    return;
+  }
+
+  // ---- Refresh system memory snapshot ----
+  if (action === 'refresh-system-memory') {
+    await renderSystemMemoryPanel();
     return;
   }
 
