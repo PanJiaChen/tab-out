@@ -377,16 +377,54 @@ header {
 }
 
 /* Favicon */
+.chip-state-stack {
+  width: 18px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding-top: 1px;
+}
+
 .chip-favicon {
   width: 16px;
   height: 16px;
-  flex-shrink: 0;
   border-radius: 2px;
 }
 
+.chip-state-bar {
+  width: 14px;
+  height: 3px;
+  border-radius: 999px;
+  background: #9b948e;
+  box-shadow: 0 1px 2px rgba(64, 56, 48, 0.12);
+}
+
+.chip-state-active {
+  background: #5a8f65;
+}
+
+.chip-state-background {
+  background: #9b948e;
+}
+
+.chip-state-high-memory {
+  background: #d39912;
+}
+
 /* Title text — wraps naturally, no truncation */
-.chip-text {
+.chip-title-block {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chip-text {
+  flex: 0 1 auto;
   min-width: 0;
   /* Show up to 2 lines, then ellipsis */
   display: -webkit-box;

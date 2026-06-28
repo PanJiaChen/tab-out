@@ -26,6 +26,99 @@
 // All open tabs — populated by fetchOpenTabs()
 let openTabs = [];
 
+const HIGH_MEMORY_THRESHOLD_BYTES = 500 * 1024 * 1024;
+
+function hasProcessesApi() {
+  return (
+    typeof chrome !== 'undefined' &&
+    chrome.processes &&
+    typeof chrome.processes.getProcessIdForTab === 'function' &&
+    typeof chrome.processes.getProcessInfo === 'function'
+  );
+}
+
+async function getProcessIdForTab(tabId) {
+  try {
+    const processId = await chrome.processes.getProcessIdForTab(tabId);
+    return typeof processId === 'number' ? processId : null;
+  } catch {
+    return null;
+  }
+}
+
+async function getProcessInfo(processIds) {
+  try {
+    return await chrome.processes.getProcessInfo(processIds, true) || {};
+  } catch {
+    return {};
+  }
+}
+
+function getProcessMemoryBytes(processInfo) {
+  const bytes = processInfo && processInfo.privateMemory;
+  return Number.isFinite(bytes) && bytes > 0 ? bytes : null;
+}
+
+function getProcessTabCount(processInfo, fallbackCount) {
+  const tabIds = new Set();
+  if (Array.isArray(processInfo && processInfo.tabs)) {
+    for (const tabId of processInfo.tabs) tabIds.add(tabId);
+  }
+  if (Array.isArray(processInfo && processInfo.tasks)) {
+    for (const task of processInfo.tasks) {
+      if (typeof task.tabId === 'number') tabIds.add(task.tabId);
+    }
+  }
+  return tabIds.size || fallbackCount || 1;
+}
+
+async function attachProcessMemoryEstimates(tabs) {
+  if (!hasProcessesApi()) return;
+
+  const candidates = tabs.filter(tab =>
+    typeof tab.id === 'number' &&
+    tab.url &&
+    !tab.discarded &&
+    !tab.url.startsWith('chrome://') &&
+    !tab.url.startsWith('chrome-extension://') &&
+    !tab.url.startsWith('about:')
+  );
+  if (candidates.length === 0) return;
+
+  const tabProcessPairs = await Promise.all(candidates.map(async tab => ({
+    tabId: tab.id,
+    processId: await getProcessIdForTab(tab.id),
+  })));
+
+  const processIds = [...new Set(tabProcessPairs
+    .map(pair => pair.processId)
+    .filter(processId => typeof processId === 'number'))];
+  if (processIds.length === 0) return;
+
+  const processInfos = await getProcessInfo(processIds);
+  const tabById = new Map(tabs.map(tab => [tab.id, tab]));
+  const fallbackCountsByProcess = new Map();
+  for (const { processId } of tabProcessPairs) {
+    if (typeof processId !== 'number') continue;
+    fallbackCountsByProcess.set(processId, (fallbackCountsByProcess.get(processId) || 0) + 1);
+  }
+
+  for (const { tabId, processId } of tabProcessPairs) {
+    if (typeof processId !== 'number') continue;
+    const tab = tabById.get(tabId);
+    const processInfo = processInfos[String(processId)] || processInfos[processId];
+    const bytes = getProcessMemoryBytes(processInfo);
+    if (!tab || !bytes) continue;
+
+    tab.memory = {
+      bytes,
+      processId,
+      sharedTabCount: getProcessTabCount(processInfo, fallbackCountsByProcess.get(processId)),
+      isHigh: bytes >= HIGH_MEMORY_THRESHOLD_BYTES,
+    };
+  }
+}
+
 /**
  * fetchOpenTabs()
  *
@@ -45,9 +138,14 @@ async function fetchOpenTabs() {
       title:    t.title,
       windowId: t.windowId,
       active:   t.active,
+      discarded: t.discarded,
+      frozen:    t.frozen,
+      autoDiscardable: t.autoDiscardable,
       // Flag Tab Out's own pages so we can detect duplicate new tabs
       isTabOut: t.url === newtabUrl || t.url === 'chrome://newtab/',
     }));
+
+    await attachProcessMemoryEstimates(openTabs);
   } catch {
     // chrome.tabs API unavailable (shouldn't happen in an extension page)
     openTabs = [];
@@ -757,29 +855,100 @@ function checkTabOutDupes() {
    OVERFLOW CHIPS ("+N more" expand button in domain cards)
    ---------------------------------------------------------------- */
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function formatMemory(bytes) {
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 1024) return `${(mb / 1024).toFixed(mb >= 10 * 1024 ? 0 : 1)} GB`;
+  return `${Math.round(mb)} MB`;
+}
+
+function getTabStateTone(tab) {
+  if (tab.memory && tab.memory.isHigh) return 'high-memory';
+  return tab.active ? 'active' : 'background';
+}
+
+function getTabStateTitle(tab) {
+  const states = [
+    tab.active
+      ? 'Active tab: selected in its Chrome window'
+      : 'Background tab: open but not selected in its Chrome window',
+  ];
+  if (tab.discarded) {
+    states.push('Sleeping: Chrome has released this tab from memory');
+  }
+  if (tab.frozen) {
+    states.push('Frozen: Chrome has frozen this tab to reduce work');
+  }
+  if (tab.memory && tab.memory.isHigh) {
+    const memoryLabel = formatMemory(tab.memory.bytes);
+    const sharedText = tab.memory.sharedTabCount > 1
+      ? ` process estimate shared by ${tab.memory.sharedTabCount} tabs`
+      : ' process-level estimate';
+    states.push(`High memory: ${memoryLabel}, ${sharedText}`);
+  }
+  return states.join(' | ');
+}
+
+function renderTabStateBar(tab) {
+  const tone = getTabStateTone(tab);
+  const title = getTabStateTitle(tab);
+  return `<span class="chip-state-bar chip-state-${tone}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}"></span>`;
+}
+
+function renderTabChip(tab, groupDomain, urlCounts = {}) {
+  let label = cleanTitle(smartTitle(stripTitleNoise(tab.title || ''), tab.url), groupDomain || '');
+  // For localhost tabs, prepend port number so you can tell projects apart
+  try {
+    const parsed = new URL(tab.url);
+    if (parsed.hostname === 'localhost' && parsed.port) label = `${parsed.port} ${label}`;
+  } catch {}
+
+  const count    = urlCounts[tab.url] || 1;
+  const dupeTag  = count > 1 ? ` <span class="chip-dupe-badge">(${count}x)</span>` : '';
+  const classes = [
+    'page-chip',
+    'clickable',
+    count > 1 ? 'chip-has-dupes' : '',
+    tab.active ? 'is-active-tab' : '',
+    tab.discarded ? 'is-sleeping-tab' : '',
+    tab.memory && tab.memory.isHigh ? 'is-high-memory-tab' : '',
+  ].filter(Boolean).join(' ');
+  const safeUrl   = escapeHtml(tab.url || '');
+  const safeTitle = escapeHtml(label);
+  let domain = '';
+  try { domain = new URL(tab.url).hostname; } catch {}
+  const faviconUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=16` : '';
+
+  return `<div class="${classes}" data-action="focus-tab" data-tab-url="${safeUrl}" title="${safeTitle}">
+    <span class="chip-state-stack">
+      ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="" onerror="this.style.display='none'">` : ''}
+      ${renderTabStateBar(tab)}
+    </span>
+    <span class="chip-title-block">
+      <span class="chip-text">${safeTitle}${dupeTag}</span>
+    </span>
+    <div class="chip-actions">
+      <button class="chip-action chip-save" data-action="defer-single-tab" data-tab-url="${safeUrl}" data-tab-title="${safeTitle}" title="Save for later">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0 1 11.186 0Z" /></svg>
+      </button>
+      <button class="chip-action chip-close" data-action="close-single-tab" data-tab-url="${safeUrl}" title="Close this tab">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
+      </button>
+    </div>
+  </div>`;
+}
+
 function buildOverflowChips(hiddenTabs, urlCounts = {}) {
   const hiddenChips = hiddenTabs.map(tab => {
-    const label    = cleanTitle(smartTitle(stripTitleNoise(tab.title || ''), tab.url), '');
-    const count    = urlCounts[tab.url] || 1;
-    const dupeTag  = count > 1 ? ` <span class="chip-dupe-badge">(${count}x)</span>` : '';
-    const chipClass = count > 1 ? ' chip-has-dupes' : '';
-    const safeUrl   = (tab.url || '').replace(/"/g, '&quot;');
-    const safeTitle = label.replace(/"/g, '&quot;');
-    let domain = '';
-    try { domain = new URL(tab.url).hostname; } catch {}
-    const faviconUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=16` : '';
-    return `<div class="page-chip clickable${chipClass}" data-action="focus-tab" data-tab-url="${safeUrl}" title="${safeTitle}">
-      ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="" onerror="this.style.display='none'">` : ''}
-      <span class="chip-text">${label}</span>${dupeTag}
-      <div class="chip-actions">
-        <button class="chip-action chip-save" data-action="defer-single-tab" data-tab-url="${safeUrl}" data-tab-title="${safeTitle}" title="Save for later">
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0 1 11.186 0Z" /></svg>
-        </button>
-        <button class="chip-action chip-close" data-action="close-single-tab" data-tab-url="${safeUrl}" title="Close this tab">
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
-        </button>
-      </div>
-    </div>`;
+    return renderTabChip(tab, '', urlCounts);
   }).join('');
 
   return `
@@ -835,32 +1004,7 @@ function renderDomainCard(group) {
   const extraCount  = uniqueTabs.length - visibleTabs.length;
 
   const pageChips = visibleTabs.map(tab => {
-    let label = cleanTitle(smartTitle(stripTitleNoise(tab.title || ''), tab.url), group.domain);
-    // For localhost tabs, prepend port number so you can tell projects apart
-    try {
-      const parsed = new URL(tab.url);
-      if (parsed.hostname === 'localhost' && parsed.port) label = `${parsed.port} ${label}`;
-    } catch {}
-    const count    = urlCounts[tab.url];
-    const dupeTag  = count > 1 ? ` <span class="chip-dupe-badge">(${count}x)</span>` : '';
-    const chipClass = count > 1 ? ' chip-has-dupes' : '';
-    const safeUrl   = (tab.url || '').replace(/"/g, '&quot;');
-    const safeTitle = label.replace(/"/g, '&quot;');
-    let domain = '';
-    try { domain = new URL(tab.url).hostname; } catch {}
-    const faviconUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=16` : '';
-    return `<div class="page-chip clickable${chipClass}" data-action="focus-tab" data-tab-url="${safeUrl}" title="${safeTitle}">
-      ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="" onerror="this.style.display='none'">` : ''}
-      <span class="chip-text">${label}</span>${dupeTag}
-      <div class="chip-actions">
-        <button class="chip-action chip-save" data-action="defer-single-tab" data-tab-url="${safeUrl}" data-tab-title="${safeTitle}" title="Save for later">
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0 1 11.186 0Z" /></svg>
-        </button>
-        <button class="chip-action chip-close" data-action="close-single-tab" data-tab-url="${safeUrl}" title="Close this tab">
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
-        </button>
-      </div>
-    </div>`;
+    return renderTabChip(tab, group.domain, urlCounts);
   }).join('') + (extraCount > 0 ? buildOverflowChips(uniqueTabs.slice(8), urlCounts) : '');
 
   let actionsHtml = `
