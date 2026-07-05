@@ -25,7 +25,81 @@
 
 // All open tabs — populated by fetchOpenTabs()
 let openTabs = [];
-const recentlyFreedTabIds = new Set();
+const FREED_FEEDBACK_MS = 6000;
+const optimisticSleepingTabIds = new Set();
+const freedFeedbackUntilByTabId = new Map();
+let freedFeedbackTimer = null;
+
+function hasFreedFeedback(tabId, now = Date.now()) {
+  const feedbackUntil = freedFeedbackUntilByTabId.get(tabId);
+  return typeof feedbackUntil === 'number' && feedbackUntil > now;
+}
+
+function pruneExpiredFreedFeedback(now = Date.now()) {
+  for (const [tabId, feedbackUntil] of freedFeedbackUntilByTabId) {
+    if (feedbackUntil <= now) freedFeedbackUntilByTabId.delete(tabId);
+  }
+}
+
+function syncOpenTabFeedbackFlags(now = Date.now()) {
+  openTabs = openTabs.map(tab => {
+    const freedByTabOut = Boolean(tab.discarded && hasFreedFeedback(tab.id, now));
+    return tab.freedByTabOut === freedByTabOut ? tab : { ...tab, freedByTabOut };
+  });
+}
+
+function scheduleFreedFeedbackCleanup() {
+  if (freedFeedbackTimer) {
+    clearTimeout(freedFeedbackTimer);
+    freedFeedbackTimer = null;
+  }
+
+  const now = Date.now();
+  pruneExpiredFreedFeedback(now);
+
+  let nextFeedbackUntil = Infinity;
+  for (const feedbackUntil of freedFeedbackUntilByTabId.values()) {
+    if (feedbackUntil > now) nextFeedbackUntil = Math.min(nextFeedbackUntil, feedbackUntil);
+  }
+
+  if (!Number.isFinite(nextFeedbackUntil)) return;
+
+  freedFeedbackTimer = setTimeout(() => {
+    freedFeedbackTimer = null;
+    pruneExpiredFreedFeedback();
+    syncOpenTabFeedbackFlags();
+    updateVisibleTabStates();
+    scheduleFreedFeedbackCleanup();
+  }, Math.max(nextFeedbackUntil - now, 0) + 25);
+}
+
+function reconcileSleepTracking(chromeTabs, now = Date.now()) {
+  const tabIds = new Set(chromeTabs.map(tab => tab.id).filter(id => id != null));
+
+  for (const tabId of optimisticSleepingTabIds) {
+    if (!tabIds.has(tabId)) optimisticSleepingTabIds.delete(tabId);
+  }
+
+  for (const tabId of freedFeedbackUntilByTabId.keys()) {
+    if (!tabIds.has(tabId)) freedFeedbackUntilByTabId.delete(tabId);
+  }
+
+  pruneExpiredFreedFeedback(now);
+
+  for (const tab of chromeTabs) {
+    if (tab.id == null) continue;
+
+    if (tab.discarded) {
+      optimisticSleepingTabIds.delete(tab.id);
+      continue;
+    }
+
+    if (tab.active) {
+      optimisticSleepingTabIds.delete(tab.id);
+      freedFeedbackUntilByTabId.delete(tab.id);
+    }
+  }
+}
 
 function hasSystemMemoryApi() {
   return (
@@ -98,24 +172,33 @@ async function fetchOpenTabs() {
     const newtabUrl = `chrome-extension://${extensionId}/index.html`;
 
     const tabs = await chrome.tabs.query({});
-    openTabs = tabs.map(t => ({
-      id:       t.id,
-      url:      t.url,
-      title:    t.title,
-      windowId: t.windowId,
-      active:   t.active,
-      audible:  t.audible,
-      pinned:   t.pinned,
-      discarded: t.discarded,
-      frozen:    t.frozen,
-      autoDiscardable: t.autoDiscardable,
-      freedByTabOut: recentlyFreedTabIds.has(t.id),
-      // Flag Tab Out's own pages so we can detect duplicate new tabs
-      isTabOut: t.url === newtabUrl || t.url === 'chrome://newtab/',
-    }));
+    const now = Date.now();
+    reconcileSleepTracking(tabs, now);
+    openTabs = tabs.map(t => {
+      const discarded = Boolean(t.discarded || optimisticSleepingTabIds.has(t.id));
+      return {
+        id:       t.id,
+        url:      t.url,
+        title:    t.title,
+        windowId: t.windowId,
+        active:   t.active,
+        audible:  t.audible,
+        pinned:   t.pinned,
+        discarded,
+        frozen:    t.frozen,
+        autoDiscardable: t.autoDiscardable,
+        freedByTabOut: Boolean(discarded && hasFreedFeedback(t.id, now)),
+        // Flag Tab Out's own pages so we can detect duplicate new tabs
+        isTabOut: t.url === newtabUrl || t.url === 'chrome://newtab/',
+      };
+    });
+    scheduleFreedFeedbackCleanup();
   } catch {
     // chrome.tabs API unavailable (shouldn't happen in an extension page)
     openTabs = [];
+    optimisticSleepingTabIds.clear();
+    freedFeedbackUntilByTabId.clear();
+    scheduleFreedFeedbackCleanup();
   }
 }
 
@@ -196,12 +279,13 @@ function getFreeMemoryCandidates(tabs) {
 }
 
 function markTabsAsSleeping(tabIds) {
+  const now = Date.now();
   openTabs = openTabs.map(tab => {
     if (!tabIds.has(tab.id)) return tab;
     return {
       ...tab,
       discarded: true,
-      freedByTabOut: true,
+      freedByTabOut: hasFreedFeedback(tab.id, now),
     };
   });
 }
@@ -219,12 +303,15 @@ async function discardTabsInBackground(tabIds) {
 function sleepTabsOptimistically(tabs) {
   const candidates = getFreeMemoryCandidates(tabs);
   const candidateIds = new Set(candidates.map(tab => tab.id));
+  const feedbackUntil = Date.now() + FREED_FEEDBACK_MS;
 
   for (const tabId of candidateIds) {
-    recentlyFreedTabIds.add(tabId);
+    optimisticSleepingTabIds.add(tabId);
+    freedFeedbackUntilByTabId.set(tabId, feedbackUntil);
   }
 
   markTabsAsSleeping(candidateIds);
+  scheduleFreedFeedbackCleanup();
   void discardTabsInBackground(candidateIds);
 
   return {
@@ -1020,9 +1107,11 @@ function renderOpenTabsSectionCount() {
   ].filter(Boolean).join(' &nbsp;&middot;&nbsp; ');
 }
 
-function getCurrentGroupTabs(group) {
+function getCurrentTabsForGroup(group, { fallbackToSnapshot = false } = {}) {
   const tabsById = new Map(openTabs.map(tab => [tab.id, tab]));
-  return (group.tabs || []).map(tab => tabsById.get(tab.id) || tab);
+  return (group.tabs || [])
+    .map(tab => tabsById.get(tab.id) || (fallbackToSnapshot ? tab : null))
+    .filter(Boolean);
 }
 
 function updateDomainFreeMemoryButton(group) {
@@ -1032,7 +1121,7 @@ function updateDomainFreeMemoryButton(group) {
   if (!actions) return;
 
   const nextHtml = renderFreeMemoryButton(
-    getCurrentGroupTabs(group),
+    getCurrentTabsForGroup(group, { fallbackToSnapshot: true }),
     'free-memory-domain',
     (count, noun) => `Sleep ${count} ${noun}`,
     `data-domain-id="${stableId}"`
@@ -1057,11 +1146,6 @@ function refreshSleepActionUi(changedGroup = null) {
   } else {
     domainGroups.forEach(updateDomainFreeMemoryButton);
   }
-}
-
-function getCurrentTabsForGroup(group) {
-  const tabsById = new Map(openTabs.map(tab => [tab.id, tab]));
-  return (group.tabs || []).map(tab => tabsById.get(tab.id)).filter(Boolean);
 }
 
 function getSleepToast(result, label) {

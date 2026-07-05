@@ -21,7 +21,7 @@ A tab whose page contents have been released from memory by Chrome and will relo
 _Avoid_: unactive tab, inactive tab, closed tab
 
 **Freed Feedback**:
-A short-lived UI feedback state for a sleeping tab that Tab Out just put to sleep with `chrome.tabs.discard()`. It is not a separate Chrome resource state and should collapse back to Sleeping after refresh or when the immediate action context is gone.
+A short-lived UI feedback state for a sleeping tab that Tab Out just put to sleep with `chrome.tabs.discard()`. It is not a separate Chrome resource state and should collapse back to Sleeping after the brief feedback window or when the tab becomes live again.
 _Avoid_: freed tab as a long-term state, freed memory amount, exact memory saved
 
 **Frozen Tab**:
@@ -44,6 +44,7 @@ _Avoid_: Chrome memory, browser memory, tab memory
 - Bulk "Close all" actions should not be the main cleanup path.
 - Eligible sleep candidates exclude active, already discarded, non-auto-discardable, audible, and pinned tabs.
 - Sleep actions should use optimistic UI updates: immediately mark eligible tabs as Sleeping/Freed Feedback in Tab Out, then call `chrome.tabs.discard()` in the background. Do not add failure rollback unless the product explicitly needs it.
+- Keep optimistic Sleeping state separate from Freed Feedback. Optimistic Sleeping prevents later tab fetches from reverting the current Tab Out page to Live; Freed Feedback is only the short-lived row accent.
 - After a Sleep action, refresh the System Memory Snapshot silently so the numbers update without showing the loading state or re-rendering unrelated dashboard sections.
 
 ## Tab State Color Model
