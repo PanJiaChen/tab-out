@@ -25,6 +25,7 @@
 
 // All open tabs — populated by fetchOpenTabs()
 let openTabs = [];
+const recentlyFreedTabIds = new Set();
 
 function hasSystemMemoryApi() {
   return (
@@ -103,9 +104,12 @@ async function fetchOpenTabs() {
       title:    t.title,
       windowId: t.windowId,
       active:   t.active,
+      audible:  t.audible,
+      pinned:   t.pinned,
       discarded: t.discarded,
       frozen:    t.frozen,
       autoDiscardable: t.autoDiscardable,
+      freedByTabOut: recentlyFreedTabIds.has(t.id),
       // Flag Tab Out's own pages so we can detect duplicate new tabs
       isTabOut: t.url === newtabUrl || t.url === 'chrome://newtab/',
     }));
@@ -113,61 +117,6 @@ async function fetchOpenTabs() {
     // chrome.tabs API unavailable (shouldn't happen in an extension page)
     openTabs = [];
   }
-}
-
-/**
- * closeTabsByUrls(urls)
- *
- * Closes all open tabs whose hostname matches any of the given URLs.
- * After closing, re-fetches the tab list to keep our state accurate.
- *
- * Special case: file:// URLs are matched exactly (they have no hostname).
- */
-async function closeTabsByUrls(urls) {
-  if (!urls || urls.length === 0) return;
-
-  // Separate file:// URLs (exact match) from regular URLs (hostname match)
-  const targetHostnames = [];
-  const exactUrls = new Set();
-
-  for (const u of urls) {
-    if (u.startsWith('file://')) {
-      exactUrls.add(u);
-    } else {
-      try { targetHostnames.push(new URL(u).hostname); }
-      catch { /* skip unparseable */ }
-    }
-  }
-
-  const allTabs = await chrome.tabs.query({});
-  const toClose = allTabs
-    .filter(tab => {
-      const tabUrl = tab.url || '';
-      if (tabUrl.startsWith('file://') && exactUrls.has(tabUrl)) return true;
-      try {
-        const tabHostname = new URL(tabUrl).hostname;
-        return tabHostname && targetHostnames.includes(tabHostname);
-      } catch { return false; }
-    })
-    .map(tab => tab.id);
-
-  if (toClose.length > 0) await chrome.tabs.remove(toClose);
-  await fetchOpenTabs();
-}
-
-/**
- * closeTabsExact(urls)
- *
- * Closes tabs by exact URL match (not hostname). Used for landing pages
- * so closing "Gmail inbox" doesn't also close individual email threads.
- */
-async function closeTabsExact(urls) {
-  if (!urls || urls.length === 0) return;
-  const urlSet = new Set(urls);
-  const allTabs = await chrome.tabs.query({});
-  const toClose = allTabs.filter(t => urlSet.has(t.url)).map(t => t.id);
-  if (toClose.length > 0) await chrome.tabs.remove(toClose);
-  await fetchOpenTabs();
 }
 
 /**
@@ -228,6 +177,60 @@ async function closeDuplicateTabs(urls, keepOne = true) {
 
   if (toClose.length > 0) await chrome.tabs.remove(toClose);
   await fetchOpenTabs();
+}
+
+function canFreeMemoryFromTab(tab) {
+  return Boolean(
+    tab &&
+    tab.id != null &&
+    !tab.active &&
+    !tab.discarded &&
+    tab.autoDiscardable !== false &&
+    !tab.audible &&
+    !tab.pinned
+  );
+}
+
+function getFreeMemoryCandidates(tabs) {
+  return (tabs || []).filter(canFreeMemoryFromTab);
+}
+
+function markTabsAsSleeping(tabIds) {
+  openTabs = openTabs.map(tab => {
+    if (!tabIds.has(tab.id)) return tab;
+    return {
+      ...tab,
+      discarded: true,
+      freedByTabOut: true,
+    };
+  });
+}
+
+async function discardTabsInBackground(tabIds) {
+  for (const tabId of tabIds) {
+    try {
+      await chrome.tabs.discard(tabId);
+    } catch (err) {
+      console.warn('[tab-out] Could not discard tab:', tabId, err);
+    }
+  }
+}
+
+function sleepTabsOptimistically(tabs) {
+  const candidates = getFreeMemoryCandidates(tabs);
+  const candidateIds = new Set(candidates.map(tab => tab.id));
+
+  for (const tabId of candidateIds) {
+    recentlyFreedTabIds.add(tabId);
+  }
+
+  markTabsAsSleeping(candidateIds);
+  void discardTabsInBackground(candidateIds);
+
+  return {
+    candidates: candidates.length,
+    slept: candidates.length,
+  };
 }
 
 /**
@@ -761,6 +764,7 @@ const ICONS = {
   close:   `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>`,
   archive: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5m6 4.125l2.25 2.25m0 0l2.25 2.25M12 13.875l2.25-2.25M12 13.875l-2.25 2.25M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z" /></svg>`,
   focus:   `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 19.5 15-15m0 0H8.25m11.25 0v11.25" /></svg>`,
+  sleep:   `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M21.752 15.002A9.72 9.72 0 0 1 18 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 0 0 3 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 0 0 9.002-5.998Z" /></svg>`,
 };
 
 
@@ -768,6 +772,18 @@ const ICONS = {
    IN-MEMORY STORE FOR OPEN-TAB GROUPS
    ---------------------------------------------------------------- */
 let domainGroups = [];
+
+function renderFreeMemoryButton(tabs, action, label, attrs = '') {
+  const count = getFreeMemoryCandidates(tabs).length;
+  if (count === 0) return '';
+
+  const noun = count === 1 ? 'tab' : 'tabs';
+  return `
+    <button class="action-btn free-memory" data-action="${action}" ${attrs}>
+      ${ICONS.sleep}
+      ${label(count, noun)}
+    </button>`;
+}
 
 
 /* ----------------------------------------------------------------
@@ -854,24 +870,26 @@ function renderSystemMemoryUnavailable(message) {
   }
 }
 
-async function renderSystemMemoryPanel() {
+async function renderSystemMemoryPanel({ silent = false } = {}) {
   const panel = document.getElementById('systemMemoryPanel');
   const statsEl = document.getElementById('systemMemoryStats');
   const usageEl = document.getElementById('systemMemoryUsage');
   if (!panel || !statsEl) return;
 
-  statsEl.innerHTML = '<div class="system-memory-loading">Loading memory snapshot...</div>';
-  if (usageEl) usageEl.textContent = '';
+  if (!silent) {
+    statsEl.innerHTML = '<div class="system-memory-loading">Loading memory snapshot...</div>';
+    if (usageEl) usageEl.textContent = '';
+  }
 
   if (!hasSystemMemoryApi()) {
-    renderSystemMemoryUnavailable('chrome.system.memory is unavailable in this context.');
+    if (!silent) renderSystemMemoryUnavailable('chrome.system.memory is unavailable in this context.');
     return;
   }
 
   const rawInfo = await getSystemMemoryInfo();
   const snapshot = normalizeSystemMemoryInfo(rawInfo);
   if (!snapshot) {
-    renderSystemMemoryUnavailable('Could not read system memory snapshot.');
+    if (!silent) renderSystemMemoryUnavailable('Could not read system memory snapshot.');
     return;
   }
 
@@ -883,13 +901,22 @@ async function renderSystemMemoryPanel() {
   ].join('');
 }
 
+function refreshSystemMemoryAfterSleep() {
+  setTimeout(() => {
+    void renderSystemMemoryPanel({ silent: true });
+  }, 500);
+}
+
 function getTabStateTone(tab) {
   if (tab.discarded) return 'sleeping';
   if (tab.frozen) return 'frozen';
-  return tab.active ? 'active' : 'background';
+  return 'live';
 }
 
 function getTabStateTitle(tab) {
+  if (tab.discarded && tab.freedByTabOut) {
+    return 'Freed by Tab Out: this tab is asleep and will reload when selected.';
+  }
   if (tab.discarded) {
     return 'Sleeping tab: Chrome has released this tab from memory. It will reload when selected.';
   }
@@ -897,9 +924,9 @@ function getTabStateTitle(tab) {
     return 'Frozen tab: Chrome has paused this tab to reduce work.';
   }
   if (tab.active) {
-    return 'Active tab: selected in its Chrome window';
+    return 'Live tab: selected in its Chrome window';
   }
-  return 'Background tab: open but not selected in its Chrome window';
+  return 'Live background tab: open but not selected in its Chrome window';
 }
 
 function renderTabStateBar(tab) {
@@ -923,15 +950,17 @@ function renderTabChip(tab, groupDomain, urlCounts = {}) {
     'clickable',
     count > 1 ? 'chip-has-dupes' : '',
     tab.active ? 'is-active-tab' : '',
+    tab.discarded && tab.freedByTabOut ? 'is-freed-tab' : '',
     tab.discarded ? 'is-sleeping-tab' : '',
   ].filter(Boolean).join(' ');
   const safeUrl   = escapeHtml(tab.url || '');
+  const safeTabId = escapeHtml(tab.id ?? '');
   const safeTitle = escapeHtml(label);
   let domain = '';
   try { domain = new URL(tab.url).hostname; } catch {}
   const faviconUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=16` : '';
 
-  return `<div class="${classes}" data-action="focus-tab" data-tab-url="${safeUrl}" title="${safeTitle}">
+  return `<div class="${classes}" data-action="focus-tab" data-tab-id="${safeTabId}" data-tab-url="${safeUrl}" title="${safeTitle}">
     <span class="chip-state-stack">
       ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="" onerror="this.style.display='none'">` : ''}
       ${renderTabStateBar(tab)}
@@ -948,6 +977,99 @@ function renderTabChip(tab, groupDomain, urlCounts = {}) {
       </button>
     </div>
   </div>`;
+}
+
+function updateTabChipState(chip, tab) {
+  if (!chip || !tab) return;
+
+  chip.classList.toggle('is-active-tab', Boolean(tab.active));
+  chip.classList.toggle('is-freed-tab', Boolean(tab.discarded && tab.freedByTabOut));
+  chip.classList.toggle('is-sleeping-tab', Boolean(tab.discarded));
+
+  const bar = chip.querySelector('.chip-state-bar');
+  if (!bar) return;
+
+  const tone = getTabStateTone(tab);
+  const title = getTabStateTitle(tab);
+  bar.className = `chip-state-bar chip-state-${tone}`;
+  bar.title = title;
+  bar.setAttribute('aria-label', title);
+}
+
+function updateVisibleTabStates() {
+  const tabsById = new Map(openTabs.map(tab => [String(tab.id), tab]));
+  document.querySelectorAll('.page-chip[data-tab-id]').forEach(chip => {
+    const tab = tabsById.get(chip.dataset.tabId);
+    if (tab) updateTabChipState(chip, tab);
+  });
+}
+
+function renderOpenTabsSectionCount() {
+  const openTabsSectionCount = document.getElementById('openTabsSectionCount');
+  if (!openTabsSectionCount) return;
+
+  const realTabs = getRealTabs();
+  const globalFreeMemoryButton = renderFreeMemoryButton(
+    realTabs,
+    'free-memory-all',
+    (count) => `Sleep ${count} inactive tab${count !== 1 ? 's' : ''}`
+  );
+  openTabsSectionCount.innerHTML = [
+    `${domainGroups.length} domain${domainGroups.length !== 1 ? 's' : ''}`,
+    globalFreeMemoryButton,
+  ].filter(Boolean).join(' &nbsp;&middot;&nbsp; ');
+}
+
+function getCurrentGroupTabs(group) {
+  const tabsById = new Map(openTabs.map(tab => [tab.id, tab]));
+  return (group.tabs || []).map(tab => tabsById.get(tab.id) || tab);
+}
+
+function updateDomainFreeMemoryButton(group) {
+  const stableId = 'domain-' + group.domain.replace(/[^a-z0-9]/g, '-');
+  const card = document.querySelector(`.mission-card[data-domain-id="${stableId}"]`);
+  const actions = card && card.querySelector('.actions');
+  if (!actions) return;
+
+  const nextHtml = renderFreeMemoryButton(
+    getCurrentGroupTabs(group),
+    'free-memory-domain',
+    (count, noun) => `Sleep ${count} ${noun}`,
+    `data-domain-id="${stableId}"`
+  ).trim();
+  const existing = actions.querySelector('.action-btn.free-memory[data-action="free-memory-domain"]');
+
+  if (existing && nextHtml) {
+    existing.outerHTML = nextHtml;
+  } else if (existing) {
+    existing.remove();
+  } else if (nextHtml) {
+    actions.insertAdjacentHTML('afterbegin', nextHtml);
+  }
+}
+
+function refreshSleepActionUi(changedGroup = null) {
+  updateVisibleTabStates();
+  renderOpenTabsSectionCount();
+
+  if (changedGroup) {
+    updateDomainFreeMemoryButton(changedGroup);
+  } else {
+    domainGroups.forEach(updateDomainFreeMemoryButton);
+  }
+}
+
+function getCurrentTabsForGroup(group) {
+  const tabsById = new Map(openTabs.map(tab => [tab.id, tab]));
+  return (group.tabs || []).map(tab => tabsById.get(tab.id)).filter(Boolean);
+}
+
+function getSleepToast(result, label) {
+  if (result.slept > 0) {
+    return `Put ${result.slept} ${label}${result.slept !== 1 ? 's' : ''} to sleep`;
+  }
+
+  return `No ${label}${label.endsWith('tab') ? 's' : ''} to sleep`;
 }
 
 function buildOverflowChips(hiddenTabs, urlCounts = {}) {
@@ -1011,11 +1133,12 @@ function renderDomainCard(group) {
     return renderTabChip(tab, group.domain, urlCounts);
   }).join('') + (extraCount > 0 ? buildOverflowChips(uniqueTabs.slice(8), urlCounts) : '');
 
-  let actionsHtml = `
-    <button class="action-btn close-tabs" data-action="close-domain-tabs" data-domain-id="${stableId}">
-      ${ICONS.close}
-      Close all ${tabCount} tab${tabCount !== 1 ? 's' : ''}
-    </button>`;
+  let actionsHtml = renderFreeMemoryButton(
+    tabs,
+    'free-memory-domain',
+    (count, noun) => `Sleep ${count} ${noun}`,
+    `data-domain-id="${stableId}"`
+  );
 
   if (hasDupes) {
     const dupeUrlsEncoded = dupeUrls.map(([url]) => encodeURIComponent(url)).join(',');
@@ -1293,12 +1416,11 @@ async function renderStaticDashboard() {
   // --- Render domain cards ---
   const openTabsSection      = document.getElementById('openTabsSection');
   const openTabsMissionsEl   = document.getElementById('openTabsMissions');
-  const openTabsSectionCount = document.getElementById('openTabsSectionCount');
   const openTabsSectionTitle = document.getElementById('openTabsSectionTitle');
 
   if (domainGroups.length > 0 && openTabsSection) {
     if (openTabsSectionTitle) openTabsSectionTitle.textContent = 'Open tabs';
-    openTabsSectionCount.innerHTML = `${domainGroups.length} domain${domainGroups.length !== 1 ? 's' : ''} &nbsp;&middot;&nbsp; <button class="action-btn close-tabs" data-action="close-all-open-tabs" style="font-size:11px;padding:3px 10px;">${ICONS.close} Close all ${realTabs.length} tabs</button>`;
+    renderOpenTabsSectionCount();
     openTabsMissionsEl.innerHTML = domainGroups.map(g => renderDomainCard(g)).join('');
     openTabsSection.style.display = 'block';
   } else if (openTabsSection) {
@@ -1360,6 +1482,33 @@ document.addEventListener('click', async (e) => {
   }
 
   const card = actionEl.closest('.mission-card');
+
+  // ---- Free memory from all eligible inactive tabs ----
+  if (action === 'free-memory-all') {
+    await fetchOpenTabs();
+    const result = sleepTabsOptimistically(getRealTabs());
+    refreshSleepActionUi();
+    refreshSystemMemoryAfterSleep();
+    showToast(getSleepToast(result, 'inactive tab'));
+    return;
+  }
+
+  // ---- Free memory from eligible inactive tabs in one domain group ----
+  if (action === 'free-memory-domain') {
+    const domainId = actionEl.dataset.domainId;
+    const group    = domainGroups.find(g => {
+      return 'domain-' + g.domain.replace(/[^a-z0-9]/g, '-') === domainId;
+    });
+    if (!group) return;
+
+    const groupLabel = group.domain === '__landing-pages__' ? 'Homepages' : (group.label || friendlyDomain(group.domain));
+    await fetchOpenTabs();
+    const result = sleepTabsOptimistically(getCurrentTabsForGroup(group));
+    refreshSleepActionUi(group);
+    refreshSystemMemoryAfterSleep();
+    showToast(getSleepToast(result, `${groupLabel} tab`));
+    return;
+  }
 
   // ---- Expand overflow chips ("+N more") ----
   if (action === 'expand-chips') {
@@ -1497,42 +1646,6 @@ document.addEventListener('click', async (e) => {
     return;
   }
 
-  // ---- Close all tabs in a domain group ----
-  if (action === 'close-domain-tabs') {
-    const domainId = actionEl.dataset.domainId;
-    const group    = domainGroups.find(g => {
-      return 'domain-' + g.domain.replace(/[^a-z0-9]/g, '-') === domainId;
-    });
-    if (!group) return;
-
-    const urls      = group.tabs.map(t => t.url);
-    // Landing pages and custom groups (whose domain key isn't a real hostname)
-    // must use exact URL matching to avoid closing unrelated tabs
-    const useExact  = group.domain === '__landing-pages__' || !!group.label;
-
-    if (useExact) {
-      await closeTabsExact(urls);
-    } else {
-      await closeTabsByUrls(urls);
-    }
-
-    if (card) {
-      playCloseSound();
-      animateCardOut(card);
-    }
-
-    // Remove from in-memory groups
-    const idx = domainGroups.indexOf(group);
-    if (idx !== -1) domainGroups.splice(idx, 1);
-
-    const groupLabel = group.domain === '__landing-pages__' ? 'Homepages' : (group.label || friendlyDomain(group.domain));
-    showToast(`Closed ${urls.length} tab${urls.length !== 1 ? 's' : ''} from ${groupLabel}`);
-
-    const statTabs = document.getElementById('statTabs');
-    if (statTabs) statTabs.textContent = openTabs.length;
-    return;
-  }
-
   // ---- Close duplicates, keep one copy ----
   if (action === 'dedup-keep-one') {
     const urlsEncoded = actionEl.dataset.dupeUrls || '';
@@ -1569,25 +1682,6 @@ document.addEventListener('click', async (e) => {
     return;
   }
 
-  // ---- Close ALL open tabs ----
-  if (action === 'close-all-open-tabs') {
-    const allUrls = openTabs
-      .filter(t => t.url && !t.url.startsWith('chrome') && !t.url.startsWith('about:'))
-      .map(t => t.url);
-    await closeTabsByUrls(allUrls);
-    playCloseSound();
-
-    document.querySelectorAll('#openTabsMissions .mission-card').forEach(c => {
-      shootConfetti(
-        c.getBoundingClientRect().left + c.offsetWidth / 2,
-        c.getBoundingClientRect().top  + c.offsetHeight / 2
-      );
-      animateCardOut(c);
-    });
-
-    showToast('All tabs closed. Fresh start.');
-    return;
-  }
 });
 
 // ---- Archive toggle — expand/collapse the archive section ----

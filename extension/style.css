@@ -13,8 +13,12 @@
   --accent-sage: #5a7a62;
   --accent-slate: #5a6b7a;
   --accent-rose: #b35a5a;
-  --status-active: #3d7a4a;
-  --status-cooling: #b8892e;
+  --status-live: #2f7d4c;
+  --status-frozen: #6e77a8;
+  --status-sleeping: #a9a19a;
+  --status-freed-accent: #12879a;
+  --status-active: var(--status-live);
+  --status-cooling: var(--status-frozen);
   --status-abandoned: #b35a5a;
   --card-bg: #fffdf9;
   --shadow: rgba(26, 22, 19, 0.06);
@@ -512,20 +516,17 @@ header {
   box-shadow: 0 1px 2px rgba(64, 56, 48, 0.12);
 }
 
-.chip-state-active {
-  background: #5a8f65;
-}
-
-.chip-state-background {
-  background: #5a6b7a;
+.chip-state-live {
+  background: var(--status-live);
 }
 
 .chip-state-sleeping {
-  background: #b7aea6;
+  background: var(--status-sleeping);
 }
 
 .chip-state-frozen {
-  background: #b8892e;
+  background: var(--status-frozen);
+  box-shadow: 0 0 0 2px rgba(110, 119, 168, 0.14);
 }
 
 /* Title text — wraps naturally, no truncation */
@@ -612,6 +613,14 @@ header {
   background: rgba(200, 113, 58, 0.04);
 }
 
+.page-chip.is-freed-tab {
+  background: rgba(18, 135, 154, 0.075);
+}
+
+.page-chip.is-freed-tab:hover {
+  background: rgba(18, 135, 154, 0.105);
+}
+
 /* "+N more" overflow chip */
 .page-chip-overflow {
   font-size: 12px;
@@ -685,15 +694,17 @@ header {
   opacity: 0.85;
 }
 
-.action-btn.close-tabs {
-  border-color: rgba(200, 113, 58, 0.3);
-  color: var(--accent-amber);
-  background: rgba(200, 113, 58, 0.04);
+.action-btn.free-memory {
+  border-color: rgba(18, 135, 154, 0.24);
+  color: #126f7e;
+  background: rgba(18, 135, 154, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55);
 }
 
-.action-btn.close-tabs:hover {
-  background: rgba(200, 113, 58, 0.1);
-  border-color: var(--accent-amber);
+.action-btn.free-memory:hover {
+  background: rgba(18, 135, 154, 0.13);
+  border-color: rgba(18, 135, 154, 0.36);
+  color: #0f5f6c;
 }
 
 .action-btn.save-tabs {
