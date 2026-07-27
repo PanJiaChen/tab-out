@@ -76,6 +76,17 @@
       <div class="section-header">
         <h2 id="openTabsSectionTitle">Right now</h2>
         <div class="section-line"></div>
+        <div class="tab-search">
+          <button class="tab-search-trigger" type="button" data-action="focus-tab-search" aria-label="Focus Tab Search">
+            <svg class="tab-search-icon" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m21 21-4.35-4.35m2.1-5.4a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0Z" /></svg>
+            <span class="tab-search-label">Search</span>
+          </button>
+          <input type="search" id="tabSearch" placeholder="Search open tabs..." aria-label="Search open tabs" autocomplete="off" spellcheck="false">
+          <button class="tab-search-clear" type="button" data-action="clear-tab-search" aria-label="Clear search" title="Clear search">
+            <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" d="M6 6l12 12M18 6 6 18" /></svg>
+          </button>
+          <span class="tab-search-shortcut" aria-hidden="true">⌘K / Ctrl K</span>
+        </div>
         <div class="section-count" id="openTabsSectionCount"></div>
       </div>
       <div class="missions" id="openTabsMissions"></div>
@@ -124,7 +135,7 @@
       </div>
     </div>
     <div class="last-refresh">
-      <span style="color: var(--muted); font-size: 11px;"><a href="https://github.com/zarazhangrui/tab-out" target="_top" style="color: var(--muted); text-decoration: underline; text-underline-offset: 2px;">Tab Out</a> by <a href="https://x.com/zarazhangrui" target="_top" style="color: var(--muted); text-decoration: underline; text-underline-offset: 2px;">Zara</a></span>
+      <span style="color: var(--muted); font-size: 11px;"><a href="https://github.com/PanJiaChen/tab-out" target="_top" style="color: var(--muted); text-decoration: underline; text-underline-offset: 2px;">Tab Out</a></span>
     </div>
   </footer>
 

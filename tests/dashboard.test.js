@@ -168,4 +168,54 @@ describe('new tab dashboard seam', () => {
     expect(alphaChip.classList.contains('is-freed-tab')).toBe(false);
     expect(alphaChip.querySelector('.chip-state-bar').getAttribute('aria-label')).toMatch(/Sleeping tab/i);
   });
+
+  test('search shows a flat list for case-insensitive terms and restores domain groups when cleared', async () => {
+    const { document } = await loadDashboard({
+      tabs: [
+        tab({ id: 1, url: 'https://symphony.test/home', title: 'Applied Symphony AI' }),
+        tab({ id: 2, url: 'https://other.test/article', title: 'Unrelated article' }),
+      ],
+    });
+    const page = within(document.body);
+    const search = page.getByRole('searchbox', { name: /search open tabs/i });
+
+    fireEvent.input(search, { target: { value: 'applied AI' } });
+
+    expect(page.getByText('Search results')).toBeTruthy();
+    expect(page.getByText('Applied Symphony AI')).toBeTruthy();
+    expect(page.getByText('Symphony Test')).toBeTruthy();
+    expect(page.queryByText('Unrelated article')).toBeNull();
+    expect(document.querySelector('.mission-card[data-domain-id]')).toBeNull();
+    expect(page.getByText('1 match')).toBeTruthy();
+    expect(document.getElementById('openTabsSectionCount').textContent).toBe('');
+
+    fireEvent.click(page.getByRole('button', { name: /clear search/i }));
+
+    expect(page.getByText('Symphony Test')).toBeTruthy();
+    expect(page.getByText('Other Test')).toBeTruthy();
+  });
+
+  test('Ctrl+K focuses Tab Search when the user is not already typing', async () => {
+    const { document } = await loadDashboard({
+      tabs: [tab({ id: 1, url: 'https://alpha.test/article', title: 'Alpha article' })],
+    });
+    const search = within(document.body).getByRole('searchbox', { name: /search open tabs/i });
+
+    fireEvent.keyDown(document, { key: 'k', ctrlKey: true });
+
+    expect(document.activeElement).toBe(search);
+  });
+
+  test('mouse press on the Search trigger moves focus to Tab Search', async () => {
+    const { document } = await loadDashboard({
+      tabs: [tab({ id: 1, url: 'https://alpha.test/article', title: 'Alpha article' })],
+    });
+    const page = within(document.body);
+    const trigger = page.getByRole('button', { name: /focus tab search/i });
+    const search = page.getByRole('searchbox', { name: /search open tabs/i });
+
+    trigger.dispatchEvent(new document.defaultView.Event('mousedown', { bubbles: true, cancelable: true }));
+
+    expect(search.matches(':focus')).toBe(true);
+  });
 });
