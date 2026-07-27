@@ -36,10 +36,25 @@ _Avoid_: close all, kill tabs, free X MB
 A point-in-time reading of device-wide physical memory from `chrome.system.memory.getInfo()`, including total and available capacity. It is not Chrome's own memory usage.
 _Avoid_: Chrome memory, browser memory, tab memory
 
+**Tab Search**:
+A local search over every open Tab's title, URL, and domain, independent of how its domain group is currently displayed. Its query is split into case-insensitive terms and every term must occur in the Tab metadata; it does not read or index page-body text.
+_Avoid_: full-text search, webpage content search, history search
+
+**Search Result Mode**:
+The temporary Open Tabs view shown for a non-empty Tab Search query. It presents every matching Tab in one flat list and replaces the grouped dashboard until the query is cleared.
+_Avoid_: expanded groups, filtered domain cards
+
+**Tab Search Shortcut**:
+The `⌘K` / `Ctrl+K` keyboard command that moves focus to Tab Search when the user is not already entering text.
+_Avoid_: global Chrome shortcut, browser command
+
 ## Product Decisions
 
 - Tab Out is a cleanup tool, not a per-tab memory profiler. Stable Chrome extension APIs do not provide reliable per-tab memory MB values.
-- Exact per-tab memory investigation should be directed to Chrome Task Manager (`Shift+Esc`, sort by Memory footprint), not represented as extension data.
+- Exact per-tab memory investigation should be directed to Chrome Task Manager (Chrome menu > More tools > Task manager, then sort by Memory footprint), not represented as extension data. `Shift+Esc` is not a reliable shortcut on every platform, including macOS setups.
+- A pure Chrome extension cannot programmatically open Chrome's native Task Manager. Do not add a button that implies one-click launch; Chrome extension commands can only trigger extension-owned actions.
+- Tab Search searches the title, URL, and domain of every currently open Tab using case-insensitive term matching: every space-separated query term must occur in the Tab metadata, but terms need not be adjacent. A non-empty query shows matching Tabs in Search Result Mode; it never reads webpage body content.
+- Tab Search is always visible in the Open Tabs area and can be focused with `⌘K` / `Ctrl+K`. Search results keep each Tab's focus, save, and close actions, but v1 does not add keyboard result navigation.
 - The primary cleanup action is sleeping tabs with `chrome.tabs.discard()`, not bulk closing tabs.
 - Bulk "Close all" actions should not be the main cleanup path.
 - Eligible sleep candidates exclude active, already discarded, non-auto-discardable, audible, and pinned tabs.

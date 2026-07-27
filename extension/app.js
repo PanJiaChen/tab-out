@@ -1022,7 +1022,7 @@ function renderTabStateBar(tab) {
   return `<span class="chip-state-bar chip-state-${tone}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}"></span>`;
 }
 
-function renderTabChip(tab, groupDomain, urlCounts = {}) {
+function renderTabChip(tab, groupDomain, urlCounts = {}, { showDomain = false } = {}) {
   let label = cleanTitle(smartTitle(stripTitleNoise(tab.title || ''), tab.url), groupDomain || '');
   // For localhost tabs, prepend port number so you can tell projects apart
   try {
@@ -1046,6 +1046,9 @@ function renderTabChip(tab, groupDomain, urlCounts = {}) {
   let domain = '';
   try { domain = new URL(tab.url).hostname; } catch {}
   const faviconUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=16` : '';
+  const domainMeta = showDomain && domain
+    ? `<span class="chip-domain">${escapeHtml(friendlyDomain(domain) || domain)}</span>`
+    : '';
 
   return `<div class="${classes}" data-action="focus-tab" data-tab-id="${safeTabId}" data-tab-url="${safeUrl}" title="${safeTitle}">
     <span class="chip-state-stack">
@@ -1054,6 +1057,7 @@ function renderTabChip(tab, groupDomain, urlCounts = {}) {
     </span>
     <span class="chip-title-block">
       <span class="chip-text">${safeTitle}${dupeTag}</span>
+      ${domainMeta}
     </span>
     <div class="chip-actions">
       <button class="chip-action chip-save" data-action="defer-single-tab" data-tab-url="${safeUrl}" data-tab-title="${safeTitle}" title="Save for later">
@@ -1064,6 +1068,86 @@ function renderTabChip(tab, groupDomain, urlCounts = {}) {
       </button>
     </div>
   </div>`;
+}
+
+function getTabSearchQuery() {
+  return document.getElementById('tabSearch')?.value.trim() || '';
+}
+
+function getTabSearchTerms(query = getTabSearchQuery()) {
+  return query.toLocaleLowerCase().split(/\s+/).filter(Boolean);
+}
+
+function getTabSearchText(tab) {
+  let domain = '';
+  try { domain = new URL(tab.url).hostname; } catch {}
+  return [tab.title || '', tab.url || '', domain].join(' ').toLocaleLowerCase();
+}
+
+function getTabSearchResults(query = getTabSearchQuery()) {
+  const terms = getTabSearchTerms(query);
+  if (terms.length === 0) return [];
+  return getRealTabs().filter(tab => {
+    const searchableText = getTabSearchText(tab);
+    return terms.every(term => searchableText.includes(term));
+  });
+}
+
+function getTabSearchDomain(tab) {
+  try {
+    return tab.url?.startsWith('file://') ? 'local-files' : new URL(tab.url).hostname;
+  } catch {
+    return '';
+  }
+}
+
+function renderTabSearchResults(query = getTabSearchQuery()) {
+  const matchingTabs = getTabSearchResults(query);
+  if (matchingTabs.length === 0) {
+    return `<div class="tab-search-empty">No open tabs match “${escapeHtml(query)}”</div>`;
+  }
+
+  const urlCounts = {};
+  for (const tab of matchingTabs) urlCounts[tab.url] = (urlCounts[tab.url] || 0) + 1;
+  const chips = matchingTabs.map(tab => renderTabChip(
+    tab,
+    getTabSearchDomain(tab),
+    urlCounts,
+    { showDomain: true }
+  )).join('');
+
+  return `
+    <div class="mission-card search-results-card has-neutral-bar">
+      <div class="status-bar"></div>
+      <div class="mission-content">
+        <div class="mission-top">
+          <span class="mission-name">Search results</span>
+          <span class="open-tabs-badge">${matchingTabs.length} match${matchingTabs.length !== 1 ? 'es' : ''}</span>
+        </div>
+        <div class="mission-pages">${chips}</div>
+      </div>
+    </div>`;
+}
+
+function renderOpenTabsView() {
+  const openTabsSection = document.getElementById('openTabsSection');
+  const openTabsMissionsEl = document.getElementById('openTabsMissions');
+  const openTabsSectionTitle = document.getElementById('openTabsSectionTitle');
+  if (!openTabsSection || !openTabsMissionsEl) return;
+
+  if (domainGroups.length === 0) {
+    openTabsSection.style.display = 'none';
+    return;
+  }
+
+  const query = getTabSearchQuery();
+  if (openTabsSectionTitle) openTabsSectionTitle.textContent = 'Open tabs';
+  renderOpenTabsSectionCount();
+  openTabsMissionsEl.classList.toggle('search-active', Boolean(query));
+  openTabsMissionsEl.innerHTML = query
+    ? renderTabSearchResults(query)
+    : domainGroups.map(g => renderDomainCard(g)).join('');
+  openTabsSection.style.display = 'block';
 }
 
 function updateTabChipState(chip, tab) {
@@ -1094,6 +1178,12 @@ function updateVisibleTabStates() {
 function renderOpenTabsSectionCount() {
   const openTabsSectionCount = document.getElementById('openTabsSectionCount');
   if (!openTabsSectionCount) return;
+
+  const query = getTabSearchQuery();
+  if (query) {
+    openTabsSectionCount.textContent = '';
+    return;
+  }
 
   const realTabs = getRealTabs();
   const globalFreeMemoryButton = renderFreeMemoryButton(
@@ -1497,19 +1587,8 @@ async function renderStaticDashboard() {
     return b.tabs.length - a.tabs.length;
   });
 
-  // --- Render domain cards ---
-  const openTabsSection      = document.getElementById('openTabsSection');
-  const openTabsMissionsEl   = document.getElementById('openTabsMissions');
-  const openTabsSectionTitle = document.getElementById('openTabsSectionTitle');
-
-  if (domainGroups.length > 0 && openTabsSection) {
-    if (openTabsSectionTitle) openTabsSectionTitle.textContent = 'Open tabs';
-    renderOpenTabsSectionCount();
-    openTabsMissionsEl.innerHTML = domainGroups.map(g => renderDomainCard(g)).join('');
-    openTabsSection.style.display = 'block';
-  } else if (openTabsSection) {
-    openTabsSection.style.display = 'none';
-  }
+  // --- Render open tabs ---
+  renderOpenTabsView();
 
   // --- Footer stats ---
   const statTabs = document.getElementById('statTabs');
@@ -1538,12 +1617,51 @@ async function renderDashboard() {
    instead of one per door.
    ---------------------------------------------------------------- */
 
+document.addEventListener('keydown', (e) => {
+  if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'k') return;
+
+  const target = e.target;
+  if (target && typeof target.matches === 'function' && target.matches('input, textarea, select, [contenteditable="true"]')) return;
+
+  const searchInput = document.getElementById('tabSearch');
+  if (!searchInput) return;
+  e.preventDefault();
+  searchInput.focus();
+});
+
+document.addEventListener('mousedown', (e) => {
+  const trigger = e.target.closest?.('[data-action="focus-tab-search"]');
+  if (!trigger) return;
+
+  e.preventDefault();
+  document.getElementById('tabSearch')?.focus();
+});
+
+document.addEventListener('input', (e) => {
+  if (e.target.id !== 'tabSearch') return;
+  renderOpenTabsView();
+});
+
 document.addEventListener('click', async (e) => {
   // Walk up the DOM to find the nearest element with data-action
   const actionEl = e.target.closest('[data-action]');
   if (!actionEl) return;
 
   const action = actionEl.dataset.action;
+
+  if (action === 'focus-tab-search') {
+    document.getElementById('tabSearch')?.focus();
+    return;
+  }
+
+  if (action === 'clear-tab-search') {
+    const searchInput = document.getElementById('tabSearch');
+    if (!searchInput) return;
+    searchInput.value = '';
+    renderOpenTabsView();
+    searchInput.focus();
+    return;
+  }
 
   // ---- Close duplicate Tab Out tabs ----
   if (action === 'close-tabout-dupes') {
@@ -1623,6 +1741,18 @@ document.addEventListener('click', async (e) => {
     if (match) await chrome.tabs.remove(match.id);
     await fetchOpenTabs();
 
+    if (getTabSearchQuery()) {
+      const chip = actionEl.closest('.page-chip');
+      if (chip) {
+        const rect = chip.getBoundingClientRect();
+        shootConfetti(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      }
+      playCloseSound();
+      await renderStaticDashboard();
+      showToast('Tab closed');
+      return;
+    }
+
     playCloseSound();
 
     // Animate the chip row out
@@ -1675,6 +1805,12 @@ document.addEventListener('click', async (e) => {
     const match   = allTabs.find(t => t.url === tabUrl);
     if (match) await chrome.tabs.remove(match.id);
     await fetchOpenTabs();
+
+    if (getTabSearchQuery()) {
+      await renderStaticDashboard();
+      showToast('Saved for later');
+      return;
+    }
 
     // Animate chip out
     const chip = actionEl.closest('.page-chip');

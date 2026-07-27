@@ -330,11 +330,142 @@ header {
   white-space: nowrap;
 }
 
+/* ---- Tab search ---- */
+.tab-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 150px;
+  min-height: 30px;
+  margin: 0;
+  padding: 5px 7px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: text;
+  transition: width 0.2s ease, background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.tab-search:focus-within,
+.tab-search:has(input:not(:placeholder-shown)) {
+  width: min(360px, 42vw);
+  background: var(--card-bg);
+  border-color: var(--accent-amber);
+  box-shadow: 0 0 0 3px rgba(200, 113, 58, 0.1);
+}
+
+.tab-search-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.tab-search-trigger,
+.tab-search-clear {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.tab-search input {
+  min-width: 0;
+  width: 0;
+  flex: 0 1 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  opacity: 0;
+  transition: flex-basis 0.2s ease, opacity 0.15s ease;
+}
+
+.tab-search:focus-within input,
+.tab-search:has(input:not(:placeholder-shown)) input {
+  flex: 1;
+  opacity: 1;
+}
+
+.tab-search input::placeholder {
+  color: var(--muted);
+}
+
+.tab-search input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.tab-search-label {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.tab-search-clear {
+  display: none;
+  flex-shrink: 0;
+  color: var(--accent-slate);
+}
+
+.tab-search-clear svg {
+  width: 16px;
+  height: 16px;
+}
+
+.tab-search-clear:hover {
+  color: var(--ink);
+}
+
+.tab-search-shortcut {
+  flex-shrink: 0;
+  padding: 0;
+  border: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.2;
+  opacity: 0.7;
+  white-space: nowrap;
+}
+
+.tab-search:focus-within .tab-search-label,
+.tab-search:has(input:not(:placeholder-shown)) .tab-search-label {
+  display: none;
+}
+
+.tab-search:has(input:not(:placeholder-shown)) .tab-search-clear {
+  display: inline-flex;
+}
+
 /* ---- Mission Cards ---- */
 .missions {
   columns: 280px;
   column-gap: 12px;
   margin-bottom: 40px;
+}
+
+.missions.search-active {
+  columns: auto;
+}
+
+.search-results-card {
+  max-width: 680px;
+}
+
+.tab-search-empty {
+  max-width: 680px;
+  padding: 18px;
+  border: 1px dashed var(--warm-gray);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .mission-card {
@@ -546,6 +677,12 @@ header {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.chip-domain {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.25;
 }
 
 /* Duplicate badge */

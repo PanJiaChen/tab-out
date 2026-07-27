@@ -1,6 +1,6 @@
 # 稳定版 Chrome 中查看高内存 tab 的可行入口
 
-Research date: 2026-07-04
+Research date: 2026-07-10
 
 ## 简短结论
 
@@ -18,9 +18,10 @@ DevTools 的 Performance、Performance monitor、Memory panel 适合对某一个
 
 操作步骤：
 
-1. 在 Chrome 里按 `Shift+Esc`，或者从 Chrome 主菜单进入 `More tools > Task manager`。[Chrome DevTools: Fix memory problems](https://developer.chrome.com/docs/devtools/memory-problems#monitor-memory-use-in-realtime-with-the-chrome-task-manager) Chrome Help 的快捷键表也把 `Shift + Esc` 列为打开 Chrome Task Manager 的快捷键。[Chrome keyboard shortcuts](https://support.google.com/chrome/answer/157179)
-2. 查看并按 `Memory footprint` 列排序，用它找当前 OS memory 占用较高的页面；官方说明 `Memory footprint` 代表 OS memory。[Chrome DevTools: Fix memory problems](https://developer.chrome.com/docs/devtools/memory-problems#monitor-memory-use-in-realtime-with-the-chrome-task-manager)
-3. 如需区分 JS heap，右键 Task Manager 表头并启用 `JavaScript memory`；官方说明该列展示 JS heap，其中括号内 live number 代表页面 reachable objects 正在使用的内存。[Chrome DevTools: Fix memory problems](https://developer.chrome.com/docs/devtools/memory-problems#monitor-memory-use-in-realtime-with-the-chrome-task-manager)
+1. 从 Chrome 主菜单进入 `More tools > Task manager`。Chrome DevTools 和 Chrome Help 都把它列为普通桌面版 Chrome 的正式入口。[Chrome DevTools: Fix memory problems](https://developer.chrome.com/docs/devtools/memory-problems#monitor-memory-use-in-realtime-with-the-chrome-task-manager) [Google Chrome Help: Manage tabs](https://support.google.com/chrome/answer/2391819)
+2. Windows/Linux 等环境也可尝试 `Shift+Esc`，但不能把它作为跨平台唯一入口；在部分 macOS 环境中不会触发，应使用菜单入口。
+3. 查看并按 `Memory footprint` 列排序，用它找当前 OS memory 占用较高的页面；官方说明 `Memory footprint` 代表 OS memory。[Chrome DevTools: Fix memory problems](https://developer.chrome.com/docs/devtools/memory-problems#monitor-memory-use-in-realtime-with-the-chrome-task-manager)
+4. 如需区分 JS heap，右键 Task Manager 表头并启用 `JavaScript memory`；官方说明该列展示 JS heap，其中括号内 live number 代表页面 reachable objects 正在使用的内存。[Chrome DevTools: Fix memory problems](https://developer.chrome.com/docs/devtools/memory-problems#monitor-memory-use-in-realtime-with-the-chrome-task-manager)
 
 可用性判断：这些说明来自 Chrome DevTools 官方文档和 Google Chrome Help 的普通 Chrome 功能说明，没有 Dev/Canary channel 限制；它们是稳定版 Chrome 用户可以使用的手动入口。[Chrome DevTools overview](https://developer.chrome.com/docs/devtools/overview) [Chrome keyboard shortcuts](https://support.google.com/chrome/answer/157179)
 
@@ -49,13 +50,14 @@ Chrome DevTools 是内置在 Google Chrome 里的开发者工具。[Chrome DevTo
 
 能用的用户入口：
 
-- Chrome Task Manager：Chrome Help 明确列出 `Shift+Esc` 打开 Chrome Task Manager，DevTools 官方文档也给出主菜单 `More tools > Task manager` 路径。[Chrome keyboard shortcuts](https://support.google.com/chrome/answer/157179) [Chrome DevTools: Fix memory problems](https://developer.chrome.com/docs/devtools/memory-problems#monitor-memory-use-in-realtime-with-the-chrome-task-manager)
+- Chrome Task Manager：Chrome Help 和 DevTools 官方文档都给出主菜单 `More tools > Task manager` 路径；这是 macOS 上快捷键不可用时的可靠入口。[Google Chrome Help: Manage tabs](https://support.google.com/chrome/answer/2391819) [Chrome DevTools: Fix memory problems](https://developer.chrome.com/docs/devtools/memory-problems#monitor-memory-use-in-realtime-with-the-chrome-task-manager)
 - Chrome Performance settings、Memory Saver、tab hover memory usage：Chrome Help 面向普通 desktop Chrome 用户说明这些设置路径，并只排除了 iOS/Android 的 performance personalization。[Personalize Chrome performance](https://support.google.com/chrome/answer/12929150)
 - Chrome DevTools：官方说明 DevTools built directly into Google Chrome，并提供普通打开方式。[Chrome DevTools overview](https://developer.chrome.com/docs/devtools/overview)
 
 不能作为稳定版 extension 依赖的入口：
 
 - `chrome.processes`：官方 extension API 页面把该 API 标为 `Availability: Dev channel`；即使它有 `getProcessIdForTab()`、`getProcessInfo(includeMemory)`、`privateMemory`、`jsMemoryUsed` 等能力，也不属于稳定版 extension 发布路径。[chrome.processes API](https://developer.chrome.com/docs/extensions/reference/api/processes)
+- Chrome Task Manager 原生窗口：Chrome 没有提供 extension API 去执行这个浏览器内置命令。`chrome.commands` 只能定义并接收 extension 自己的命令，而且浏览器/系统快捷键优先，extension 不能覆盖。[chrome.commands API](https://developer.chrome.com/docs/extensions/reference/api/commands) Chromium 当前正式 `chrome://` WebUI host 列表也没有 `task-manager`，因此不存在可由 Tab Out 安全打开的稳定 `chrome://task-manager` 入口。[Chromium WebUI URL constants](https://chromium.googlesource.com/chromium/src/+/main/chrome/common/webui_url_constants.cc)
 
 ## 对 Tab Out 的产品/API 影响
 
@@ -65,7 +67,11 @@ Tab Out 不应在稳定版里展示“每个 tab 当前精确占用 N MB”的�
 
 `chrome.system.memory.getInfo()` 只能获取 physical memory 的 `capacity` 和 `availableCapacity`，是整机级内存信息，不包含 tabId 或 processId，因此可用于整体内存压力提示，不能用于 per-tab 排名。[chrome.system.memory API](https://developer.chrome.com/docs/extensions/reference/api/system/memory)
 
-`chrome.debugger` 是稳定版可用的调试传输 API，可以 attach 到 tab 并发送 Chrome DevTools Protocol commands，但它需要 `"debugger"` 权限，官方也说明出于安全原因只开放部分 CDP domains；其允许列表包含 `Performance`，但不包含 CDP `Memory` 或 `SystemInfo` domain。[chrome.debugger API](https://developer.chrome.com/docs/extensions/reference/api/debugger) CDP `Performance.getMetrics` 官方只承诺返回 current run-time metrics 的 name/value 列表，不是 Task Manager 的 OS/private memory per tab 值。[CDP Performance domain](https://chromedevtools.github.io/devtools-protocol/1-3/Performance/)
+`chrome.debugger` 是稳定版可用的调试传输 API，可以 attach 到 tab 并发送 Chrome DevTools Protocol commands，但它需要 `"debugger"` 权限，且安装时会触发高敏感度警告；该权限不能作为 optional permission。其允许列表包含 `Runtime`、`Performance`、`Target` 和 `Tracing`，但不包含 CDP `Memory` 或 `SystemInfo` domain。[chrome.debugger API](https://developer.chrome.com/docs/extensions/reference/api/debugger) [Chrome permissions list](https://developer.chrome.com/docs/extensions/reference/permissions-list#debugger) [chrome.permissions](https://developer.chrome.com/docs/extensions/reference/api/permissions#permissions-that-can-not-be-specified-as-optional)
+
+通过允许的 `Runtime.getHeapUsage`，extension 理论上能得到对应 V8 isolate 的 JS heap，但该方法是 experimental、isolate-scoped，不是 OS/process/tab 总内存；`Performance.getMetrics` 也只承诺返回 runtime metric 的 name/value。[CDP Runtime.getHeapUsage](https://chromedevtools.github.io/devtools-protocol/tot/Runtime/#method-getHeapUsage) [CDP Performance.getMetrics](https://chromedevtools.github.io/devtools-protocol/tot/Performance/#method-getMetrics) `Tracing.requestMemoryDump` 还能请求 experimental global memory dump，但 MemoryInfra 结果按 process/subsystem 组织，仍不能无歧义拆成 per-tab 数字。[CDP Tracing](https://chromedevtools.github.io/devtools-protocol/tot/Tracing/#method-requestMemoryDump) [Chromium MemoryInfra](https://chromium.googlesource.com/chromium/src/+/main/docs/memory-infra/README.md)
+
+这里还有结构性归因问题：一个 tab 可因 out-of-process iframe 或 worker 对应多个 target/process；同一个 renderer process 也可能因 process reuse 承载多个 tab/task。Chromium Task Manager 本身会按 process 分组 documents/workers，并说明来自多个 tab 的 subframe 可能共享 process。由此可知，即便获得 process memory，也不能直接当成某个 tab 的精确占用。[chrome.debugger: Work with frames](https://developer.chrome.com/docs/extensions/reference/api/debugger#work-with-frames) [Chromium: Process Model and Site Isolation](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/docs/process_model_and_site_isolation.md#visualizations)
 
 ### 可以做的稳定版近似信号
 
@@ -95,4 +101,9 @@ Tab Out 可以用这些 stable `chrome.tabs` 字段构造“内存友好/可清�
 - [Chrome Extensions API: chrome.tabs](https://developer.chrome.com/docs/extensions/reference/api/tabs)
 - [Chrome Extensions API: chrome.system.memory](https://developer.chrome.com/docs/extensions/reference/api/system/memory)
 - [Chrome Extensions API: chrome.debugger](https://developer.chrome.com/docs/extensions/reference/api/debugger)
-- [Chrome DevTools Protocol stable 1.3: Performance domain](https://chromedevtools.github.io/devtools-protocol/1-3/Performance/)
+- [Chrome Extensions API: chrome.commands](https://developer.chrome.com/docs/extensions/reference/api/commands)
+- [Chrome DevTools Protocol: Runtime domain](https://chromedevtools.github.io/devtools-protocol/tot/Runtime/)
+- [Chrome DevTools Protocol: Performance domain](https://chromedevtools.github.io/devtools-protocol/tot/Performance/)
+- [Chrome DevTools Protocol: Tracing domain](https://chromedevtools.github.io/devtools-protocol/tot/Tracing/)
+- [Chromium: Process Model and Site Isolation](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/docs/process_model_and_site_isolation.md)
+- [Chromium MemoryInfra](https://chromium.googlesource.com/chromium/src/+/main/docs/memory-infra/README.md)
