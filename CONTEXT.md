@@ -48,6 +48,14 @@ _Avoid_: expanded groups, filtered domain cards
 The `⌘K` / `Ctrl+K` keyboard command that moves focus to Tab Search when the user is not already entering text.
 _Avoid_: global Chrome shortcut, browser command
 
+**Needs Review**:
+A compact, local queue of up to three domain or custom groups that contain tabs not activated for at least seven days. It helps users review stale work, not identify memory-heavy tabs or trigger automatic cleanup.
+_Avoid_: automatic sleep recommendation, high-memory alert, stale domain
+
+**Review Candidate**:
+An individual tab with a valid `lastAccessed` time at least seven days old that is not active, pinned, or audible. Candidates are displayed within their domain group and may already be sleeping.
+_Avoid_: inactive group, safe-to-close tab, unimportant tab
+
 ## Product Decisions
 
 - Tab Out is a cleanup tool, not a per-tab memory profiler. Stable Chrome extension APIs do not provide reliable per-tab memory MB values.
@@ -55,6 +63,8 @@ _Avoid_: global Chrome shortcut, browser command
 - A pure Chrome extension cannot programmatically open Chrome's native Task Manager. Do not add a button that implies one-click launch; Chrome extension commands can only trigger extension-owned actions.
 - Tab Search searches the title, URL, and domain of every currently open Tab using case-insensitive term matching: every space-separated query term must occur in the Tab metadata, but terms need not be adjacent. A non-empty query shows matching Tabs in Search Result Mode; it never reads webpage body content.
 - Tab Search is always visible in the Open Tabs area and can be focused with `⌘K` / `Ctrl+K`. Search results keep each Tab's focus, save, and close actions, but v1 does not add keyboard result navigation.
+- Needs Review is available only when Chrome supplies `lastAccessed`. It groups individual Review Candidates by domain or configured custom group, excludes Homepages, and ranks groups by their oldest candidate.
+- Needs Review is an organizational prompt: it starts collapsed to a one-line local summary and can be expanded for the current new-tab session. `Review` highlights the current candidates in their domain card, and `Snooze 30 days` locally suppresses only the currently shown URLs for 30 days. Sleeping a tab does not count as reviewing it.
 - The primary cleanup action is sleeping tabs with `chrome.tabs.discard()`, not bulk closing tabs.
 - Bulk "Close all" actions should not be the main cleanup path.
 - Eligible sleep candidates exclude active, already discarded, non-auto-discardable, audible, and pinned tabs.

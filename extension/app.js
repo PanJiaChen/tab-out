@@ -26,9 +26,13 @@
 // All open tabs — populated by fetchOpenTabs()
 let openTabs = [];
 const FREED_FEEDBACK_MS = 6000;
+const REVIEW_INACTIVE_MS = 7 * 24 * 60 * 60 * 1000;
+const REVIEW_SNOOZE_MS = 30 * 24 * 60 * 60 * 1000;
 const optimisticSleepingTabIds = new Set();
 const freedFeedbackUntilByTabId = new Map();
 let freedFeedbackTimer = null;
+let reviewSnoozesByUrl = {};
+let isNeedsReviewExpanded = false;
 
 function hasFreedFeedback(tabId, now = Date.now()) {
   const feedbackUntil = freedFeedbackUntilByTabId.get(tabId);
@@ -184,6 +188,7 @@ async function fetchOpenTabs() {
         active:   t.active,
         audible:  t.audible,
         pinned:   t.pinned,
+        lastAccessed: t.lastAccessed,
         discarded,
         frozen:    t.frozen,
         autoDiscardable: t.autoDiscardable,
@@ -276,6 +281,72 @@ function canFreeMemoryFromTab(tab) {
 
 function getFreeMemoryCandidates(tabs) {
   return (tabs || []).filter(canFreeMemoryFromTab);
+}
+
+function pruneReviewSnoozes(snoozes, now = Date.now()) {
+  return Object.fromEntries(Object.entries(snoozes || {}).filter(([, until]) => until > now));
+}
+
+async function loadReviewSnoozes() {
+  try {
+    const { reviewSnoozesByUrl: storedSnoozes = {} } = await chrome.storage.local.get('reviewSnoozesByUrl');
+    reviewSnoozesByUrl = pruneReviewSnoozes(storedSnoozes);
+  } catch {
+    reviewSnoozesByUrl = {};
+  }
+}
+
+async function snoozeReviewUrls(urls, now = Date.now()) {
+  const { reviewSnoozesByUrl: storedSnoozes = {} } = await chrome.storage.local.get('reviewSnoozesByUrl');
+  const snoozes = pruneReviewSnoozes(storedSnoozes, now);
+  const until = now + REVIEW_SNOOZE_MS;
+
+  for (const url of urls) snoozes[url] = until;
+
+  reviewSnoozesByUrl = snoozes;
+  await chrome.storage.local.set({ reviewSnoozesByUrl: snoozes });
+}
+
+function isReviewCandidate(tab, now = Date.now()) {
+  const snoozedUntil = reviewSnoozesByUrl[tab?.url];
+
+  return Boolean(
+    tab &&
+    tab.id != null &&
+    !tab.active &&
+    !tab.pinned &&
+    !tab.audible &&
+    Number.isFinite(tab.lastAccessed) &&
+    tab.lastAccessed > 0 &&
+    now - tab.lastAccessed >= REVIEW_INACTIVE_MS &&
+    (!snoozedUntil || snoozedUntil <= now)
+  );
+}
+
+function getNeedsReviewGroups(groups = domainGroups, now = Date.now()) {
+  return groups
+    .filter(group => group.domain !== '__landing-pages__')
+    .map(group => {
+      const candidates = (group.tabs || []).filter(tab => isReviewCandidate(tab, now));
+      const oldestLastAccessed = Math.min(...candidates.map(tab => tab.lastAccessed));
+      return { group, candidates, oldestLastAccessed };
+    })
+    .filter(({ candidates }) => candidates.length > 0)
+    .sort((a, b) => (
+      a.oldestLastAccessed - b.oldestLastAccessed ||
+      b.candidates.length - a.candidates.length
+    ));
+}
+
+function formatInactiveDuration(lastAccessed, now = Date.now()) {
+  const inactiveMinutes = Math.floor(Math.max(now - lastAccessed, 0) / (60 * 1000));
+  if (inactiveMinutes < 60) return `${Math.max(inactiveMinutes, 1)} min`;
+
+  const inactiveHours = Math.floor(inactiveMinutes / 60);
+  if (inactiveHours < 24) return `${inactiveHours} hour${inactiveHours === 1 ? '' : 's'}`;
+
+  const inactiveDays = Math.floor(inactiveHours / 24);
+  return `${inactiveDays} day${inactiveDays === 1 ? '' : 's'}`;
 }
 
 function markTabsAsSleeping(tabIds) {
@@ -852,6 +923,7 @@ const ICONS = {
   archive: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5m6 4.125l2.25 2.25m0 0l2.25 2.25M12 13.875l2.25-2.25M12 13.875l-2.25 2.25M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z" /></svg>`,
   focus:   `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 19.5 15-15m0 0H8.25m11.25 0v11.25" /></svg>`,
   sleep:   `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M21.752 15.002A9.72 9.72 0 0 1 18 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 0 0 3 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 0 0 9.002-5.998Z" /></svg>`,
+  snooze:  `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m3.75 0a8.25 8.25 0 1 1-16.5 0 8.25 8.25 0 0 1 16.5 0Z" /></svg>`,
 };
 
 
@@ -870,6 +942,54 @@ function renderFreeMemoryButton(tabs, action, label, attrs = '') {
       ${ICONS.sleep}
       ${label(count, noun)}
     </button>`;
+}
+
+function getDomainCardId(domain) {
+  return 'domain-' + domain.replace(/[^a-z0-9]/g, '-');
+}
+
+function renderNeedsReview() {
+  const reviewGroups = getNeedsReviewGroups().slice(0, 3);
+  if (reviewGroups.length === 0) return '';
+
+  const groupCount = reviewGroups.length;
+  const tabCount = reviewGroups.reduce((total, { candidates }) => total + candidates.length, 0);
+  const summary = `${groupCount} group${groupCount === 1 ? '' : 's'} · ${tabCount} tab${tabCount === 1 ? '' : 's'} need review`;
+
+  const rows = reviewGroups.map(({ group, candidates, oldestLastAccessed }) => {
+    const label = group.label || friendlyDomain(group.domain);
+    const candidateUrls = encodeURIComponent(JSON.stringify(candidates.map(tab => tab.url)));
+    const domain = encodeURIComponent(group.domain);
+    const oldestFor = formatInactiveDuration(oldestLastAccessed);
+    const count = candidates.length;
+
+    return `
+      <div class="needs-review-row">
+        <div class="needs-review-copy">
+          <strong>${escapeHtml(label)}</strong>
+          <span>${count} tab${count === 1 ? '' : 's'} need review · oldest ${oldestFor}</span>
+        </div>
+        <div class="needs-review-actions">
+          <button class="action-btn review-tabs" data-action="review-tabs" data-review-domain="${escapeHtml(domain)}" aria-label="Review ${escapeHtml(label)}">${ICONS.focus}Review</button>
+          <button class="action-btn snooze-review" data-action="snooze-review-tabs" data-review-urls="${escapeHtml(candidateUrls)}" aria-label="Snooze ${escapeHtml(label)} for 30 days">${ICONS.snooze}Snooze 30 days</button>
+        </div>
+      </div>`;
+  }).join('');
+
+  return `
+    <section class="needs-review${isNeedsReviewExpanded ? ' is-expanded' : ''}" aria-label="Needs review">
+      <div class="needs-review-summary">
+        <div>
+          <div class="needs-review-heading">Needs review</div>
+          <span>${summary}</span>
+        </div>
+        <button class="needs-review-toggle" data-action="toggle-needs-review" aria-expanded="${isNeedsReviewExpanded}" aria-label="${isNeedsReviewExpanded ? 'Collapse' : 'Show'} Needs review">
+          <span>${isNeedsReviewExpanded ? 'Collapse' : 'Show'}</span>
+          <span class="needs-review-toggle-chevron" aria-hidden="true">⌄</span>
+        </button>
+      </div>
+      ${isNeedsReviewExpanded ? `<div class="needs-review-list">${rows}</div>` : ''}
+    </section>`;
 }
 
 
@@ -1146,8 +1266,41 @@ function renderOpenTabsView() {
   openTabsMissionsEl.classList.toggle('search-active', Boolean(query));
   openTabsMissionsEl.innerHTML = query
     ? renderTabSearchResults(query)
-    : domainGroups.map(g => renderDomainCard(g)).join('');
+    : [
+        renderNeedsReview(),
+        ...domainGroups.map(g => renderDomainCard(g)),
+      ].filter(Boolean).join('');
   openTabsSection.style.display = 'block';
+}
+
+function focusNeedsReviewGroup(domain) {
+  const group = domainGroups.find(candidate => candidate.domain === domain);
+  if (!group) return;
+
+  const reviewTabIds = new Set(
+    group.tabs.filter(tab => isReviewCandidate(tab)).map(tab => String(tab.id))
+  );
+  if (reviewTabIds.size === 0) return;
+
+  const card = document.querySelector(`[data-domain-id="${getDomainCardId(domain)}"]`);
+  if (!card) return;
+
+  const overflow = card.querySelector('.page-chips-overflow');
+  if (overflow) overflow.style.display = 'contents';
+  card.querySelector('.page-chip-overflow')?.remove();
+
+  card.classList.add('is-reviewing');
+  card.querySelectorAll('.page-chip[data-tab-id]').forEach(chip => {
+    chip.classList.toggle('is-review-candidate', reviewTabIds.has(chip.dataset.tabId));
+  });
+  card.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+
+  setTimeout(() => {
+    card.classList.remove('is-reviewing');
+    card.querySelectorAll('.page-chip.is-review-candidate').forEach(chip => {
+      chip.classList.remove('is-review-candidate');
+    });
+  }, 4000);
 }
 
 function updateTabChipState(chip, tab) {
@@ -1205,7 +1358,7 @@ function getCurrentTabsForGroup(group, { fallbackToSnapshot = false } = {}) {
 }
 
 function updateDomainFreeMemoryButton(group) {
-  const stableId = 'domain-' + group.domain.replace(/[^a-z0-9]/g, '-');
+  const stableId = getDomainCardId(group.domain);
   const card = document.querySelector(`.mission-card[data-domain-id="${stableId}"]`);
   const actions = card && card.querySelector('.actions');
   if (!actions) return;
@@ -1273,7 +1426,7 @@ function renderDomainCard(group) {
   const tabs      = group.tabs || [];
   const tabCount  = tabs.length;
   const isLanding = group.domain === '__landing-pages__';
-  const stableId  = 'domain-' + group.domain.replace(/[^a-z0-9]/g, '-');
+  const stableId  = getDomainCardId(group.domain);
 
   // Count duplicates (exact URL match)
   const urlCounts = {};
@@ -1472,7 +1625,7 @@ async function renderStaticDashboard() {
   if (dateEl)     dateEl.textContent     = getDateDisplay();
 
   // --- Fetch tabs ---
-  await fetchOpenTabs();
+  await Promise.all([fetchOpenTabs(), loadReviewSnoozes()]);
   const realTabs = getRealTabs();
 
   // --- Group tabs by domain ---
@@ -1683,6 +1836,32 @@ document.addEventListener('click', async (e) => {
     return;
   }
 
+  if (action === 'toggle-needs-review') {
+    isNeedsReviewExpanded = !isNeedsReviewExpanded;
+    renderOpenTabsView();
+    return;
+  }
+
+  if (action === 'review-tabs') {
+    const domain = decodeURIComponent(actionEl.dataset.reviewDomain || '');
+    await renderStaticDashboard();
+    focusNeedsReviewGroup(domain);
+    return;
+  }
+
+  if (action === 'snooze-review-tabs') {
+    try {
+      const urls = JSON.parse(decodeURIComponent(actionEl.dataset.reviewUrls || ''));
+      if (!Array.isArray(urls) || urls.length === 0) return;
+      await snoozeReviewUrls(urls);
+      renderOpenTabsView();
+      showToast('Review reminder snoozed for 30 days');
+    } catch {
+      showToast('Could not snooze this reminder');
+    }
+    return;
+  }
+
   const card = actionEl.closest('.mission-card');
 
   // ---- Free memory from all eligible inactive tabs ----
@@ -1699,7 +1878,7 @@ document.addEventListener('click', async (e) => {
   if (action === 'free-memory-domain') {
     const domainId = actionEl.dataset.domainId;
     const group    = domainGroups.find(g => {
-      return 'domain-' + g.domain.replace(/[^a-z0-9]/g, '-') === domainId;
+      return getDomainCardId(g.domain) === domainId;
     });
     if (!group) return;
 
