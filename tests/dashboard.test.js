@@ -15,7 +15,7 @@ afterEach(() => {
 });
 
 async function flushAsyncWork() {
-  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+  for (let i = 0; i < 20; i += 1) await Promise.resolve();
 }
 
 function tab(overrides) {
@@ -167,6 +167,129 @@ describe('new tab dashboard seam', () => {
     expect(alphaChip.classList.contains('is-sleeping-tab')).toBe(true);
     expect(alphaChip.classList.contains('is-freed-tab')).toBe(false);
     expect(alphaChip.querySelector('.chip-state-bar').getAttribute('aria-label')).toMatch(/Sleeping tab/i);
+  });
+
+  test('keeps Needs Review collapsed until the user expands its groups', async () => {
+    vi.useFakeTimers({ now: new Date('2026-07-05T12:00:00Z') });
+    const { document } = await loadDashboard({
+      tabs: [
+        tab({
+          id: 1,
+          url: 'https://www.figma.com/file/old-design',
+          title: 'Old design',
+          lastAccessed: new Date('2026-06-26T12:00:00Z').getTime(),
+        }),
+        tab({
+          id: 2,
+          url: 'https://www.figma.com/file/current-design',
+          title: 'Current design',
+          active: true,
+          lastAccessed: new Date('2026-07-05T11:00:00Z').getTime(),
+        }),
+        tab({
+          id: 3,
+          url: 'https://www.figma.com/file/reference',
+          title: 'Pinned reference',
+          pinned: true,
+          lastAccessed: new Date('2026-06-20T12:00:00Z').getTime(),
+        }),
+        tab({
+          id: 4,
+          url: 'https://www.figma.com/file/old-flow',
+          title: 'Old flow',
+          lastAccessed: new Date('2026-06-27T12:00:00Z').getTime(),
+        }),
+        tab({
+          id: 5,
+          url: 'https://github.com/',
+          title: 'GitHub',
+          lastAccessed: new Date('2026-06-01T12:00:00Z').getTime(),
+        }),
+        tab({
+          id: 6,
+          url: 'https://www.figma.com/file/live-call',
+          title: 'Live call',
+          audible: true,
+          lastAccessed: new Date('2026-06-01T12:00:00Z').getTime(),
+        }),
+      ],
+    });
+    const page = within(document.body);
+
+    const reviewQueue = page.getByRole('region', { name: /needs review/i });
+    expect(within(reviewQueue).getByRole('button', { name: /show/i }).getAttribute('aria-expanded')).toBe('false');
+    expect(within(reviewQueue).queryByText('Figma')).toBeNull();
+
+    fireEvent.click(within(reviewQueue).getByRole('button', { name: /show/i }));
+
+    const expandedQueue = page.getByRole('region', { name: /needs review/i });
+    const collapseButton = within(expandedQueue).getByRole('button', { name: /collapse needs review/i });
+    expect(collapseButton.getAttribute('aria-expanded')).toBe('true');
+    expect(collapseButton.classList.contains('action-btn')).toBe(false);
+    expect(within(expandedQueue).getByText('Figma')).toBeTruthy();
+    expect(within(expandedQueue).getByText('2 tabs need review · oldest 9 days')).toBeTruthy();
+    expect(within(expandedQueue).queryByText('Homepages')).toBeNull();
+
+    fireEvent.click(collapseButton);
+
+    expect(within(page.getByRole('region', { name: /needs review/i })).queryByText('Figma')).toBeNull();
+  });
+
+  test('reviews and snoozes only the stale tabs shown for a domain', async () => {
+    vi.useFakeTimers({ now: new Date('2026-07-05T12:00:00Z') });
+    const { chrome, document } = await loadDashboard({
+      tabs: [
+        tab({ id: 1, url: 'https://www.figma.com/file/old-design', title: 'Old design', lastAccessed: new Date('2026-06-26T12:00:00Z').getTime() }),
+        tab({ id: 2, url: 'https://www.figma.com/file/current-design', title: 'Current design', active: true, lastAccessed: new Date('2026-07-05T11:00:00Z').getTime() }),
+        tab({ id: 3, url: 'https://www.figma.com/file/old-flow', title: 'Old flow', lastAccessed: new Date('2026-06-27T12:00:00Z').getTime() }),
+      ],
+    });
+    const page = within(document.body);
+    const collapsedQueue = page.getByRole('region', { name: /needs review/i });
+    fireEvent.click(within(collapsedQueue).getByRole('button', { name: /show/i }));
+    const reviewQueue = page.getByRole('region', { name: /needs review/i });
+
+    fireEvent.click(within(reviewQueue).getByRole('button', { name: /review figma/i }));
+    await flushAsyncWork();
+
+    const figmaCard = document.querySelector('[data-domain-id="domain-www-figma-com"]');
+    expect(figmaCard.classList.contains('is-reviewing')).toBe(true);
+    expect(figmaCard.querySelector('[data-tab-id="1"]').classList.contains('is-review-candidate')).toBe(true);
+    expect(figmaCard.querySelector('[data-tab-id="3"]').classList.contains('is-review-candidate')).toBe(true);
+    expect(figmaCard.querySelector('[data-tab-id="2"]').classList.contains('is-review-candidate')).toBe(false);
+
+    const refreshedQueue = page.getByRole('region', { name: /needs review/i });
+    const snoozeButton = within(refreshedQueue).getByRole('button', { name: /snooze figma for 30 days/i });
+    expect(snoozeButton.textContent).toMatch(/Snooze 30 days/);
+    fireEvent.click(snoozeButton);
+    await flushAsyncWork();
+
+    expect(page.queryByRole('region', { name: /needs review/i })).toBeNull();
+    const [[{ reviewSnoozesByUrl }]] = chrome.storage.local.set.mock.calls.slice(-1);
+    expect(Object.keys(reviewSnoozesByUrl).sort()).toEqual([
+      'https://www.figma.com/file/old-design',
+      'https://www.figma.com/file/old-flow',
+    ].sort());
+  });
+
+  test('shows at most three review groups ordered by their oldest stale tab', async () => {
+    vi.useFakeTimers({ now: new Date('2026-07-05T12:00:00Z') });
+    const daysAgo = (days) => new Date('2026-07-05T12:00:00Z').getTime() - days * 24 * 60 * 60 * 1000;
+    const { document } = await loadDashboard({
+      tabs: [
+        tab({ id: 1, url: 'https://one.test/old', title: 'One', lastAccessed: daysAgo(8) }),
+        tab({ id: 2, url: 'https://two.test/old', title: 'Two', lastAccessed: daysAgo(9) }),
+        tab({ id: 3, url: 'https://three.test/old', title: 'Three', lastAccessed: daysAgo(10) }),
+        tab({ id: 4, url: 'https://four.test/old', title: 'Four', lastAccessed: daysAgo(11) }),
+      ],
+    });
+    const page = within(document.body);
+    const collapsedQueue = page.getByRole('region', { name: /needs review/i });
+    fireEvent.click(within(collapsedQueue).getByRole('button', { name: /show/i }));
+    const reviewQueue = page.getByRole('region', { name: /needs review/i });
+    const labels = [...reviewQueue.querySelectorAll('.needs-review-copy strong')].map(item => item.textContent);
+
+    expect(labels).toEqual(['Four Test', 'Three Test', 'Two Test']);
   });
 
   test('search shows a flat list for case-insensitive terms and restores domain groups when cleared', async () => {
