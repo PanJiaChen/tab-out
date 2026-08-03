@@ -992,6 +992,13 @@ function renderNeedsReview() {
     </section>`;
 }
 
+function renderNeedsReviewMount({ hidden = false } = {}) {
+  const needsReviewMount = document.getElementById('needsReviewMount');
+  if (!needsReviewMount) return;
+
+  needsReviewMount.innerHTML = hidden ? '' : renderNeedsReview();
+}
+
 
 /* ----------------------------------------------------------------
    HELPER: filter out browser-internal pages
@@ -1264,12 +1271,10 @@ function renderOpenTabsView() {
   if (openTabsSectionTitle) openTabsSectionTitle.textContent = 'Open tabs';
   renderOpenTabsSectionCount();
   openTabsMissionsEl.classList.toggle('search-active', Boolean(query));
+  renderNeedsReviewMount({ hidden: Boolean(query) });
   openTabsMissionsEl.innerHTML = query
     ? renderTabSearchResults(query)
-    : [
-        renderNeedsReview(),
-        ...domainGroups.map(g => renderDomainCard(g)),
-      ].filter(Boolean).join('');
+    : domainGroups.map(g => renderDomainCard(g)).join('');
   openTabsSection.style.display = 'block';
 }
 
@@ -1838,13 +1843,12 @@ document.addEventListener('click', async (e) => {
 
   if (action === 'toggle-needs-review') {
     isNeedsReviewExpanded = !isNeedsReviewExpanded;
-    renderOpenTabsView();
+    renderNeedsReviewMount();
     return;
   }
 
   if (action === 'review-tabs') {
     const domain = decodeURIComponent(actionEl.dataset.reviewDomain || '');
-    await renderStaticDashboard();
     focusNeedsReviewGroup(domain);
     return;
   }

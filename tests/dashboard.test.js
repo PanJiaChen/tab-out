@@ -215,6 +215,7 @@ describe('new tab dashboard seam', () => {
       ],
     });
     const page = within(document.body);
+    const firstDomainCard = document.querySelector('.domain-card');
 
     const reviewQueue = page.getByRole('region', { name: /needs review/i });
     expect(within(reviewQueue).getByRole('button', { name: /show/i }).getAttribute('aria-expanded')).toBe('false');
@@ -229,10 +230,12 @@ describe('new tab dashboard seam', () => {
     expect(within(expandedQueue).getByText('Figma')).toBeTruthy();
     expect(within(expandedQueue).getByText('2 tabs need review · oldest 9 days')).toBeTruthy();
     expect(within(expandedQueue).queryByText('Homepages')).toBeNull();
+    expect(document.querySelector('.domain-card') === firstDomainCard).toBe(true);
 
     fireEvent.click(collapseButton);
 
     expect(within(page.getByRole('region', { name: /needs review/i })).queryByText('Figma')).toBeNull();
+    expect(document.querySelector('.domain-card') === firstDomainCard).toBe(true);
   });
 
   test('reviews and snoozes only the stale tabs shown for a domain', async () => {
@@ -245,6 +248,7 @@ describe('new tab dashboard seam', () => {
       ],
     });
     const page = within(document.body);
+    const firstDomainCard = document.querySelector('.domain-card');
     const collapsedQueue = page.getByRole('region', { name: /needs review/i });
     fireEvent.click(within(collapsedQueue).getByRole('button', { name: /show/i }));
     const reviewQueue = page.getByRole('region', { name: /needs review/i });
@@ -257,6 +261,7 @@ describe('new tab dashboard seam', () => {
     expect(figmaCard.querySelector('[data-tab-id="1"]').classList.contains('is-review-candidate')).toBe(true);
     expect(figmaCard.querySelector('[data-tab-id="3"]').classList.contains('is-review-candidate')).toBe(true);
     expect(figmaCard.querySelector('[data-tab-id="2"]').classList.contains('is-review-candidate')).toBe(false);
+    expect(document.querySelector('.domain-card') === firstDomainCard).toBe(true);
 
     const refreshedQueue = page.getByRole('region', { name: /needs review/i });
     const snoozeButton = within(refreshedQueue).getByRole('button', { name: /snooze figma for 30 days/i });
