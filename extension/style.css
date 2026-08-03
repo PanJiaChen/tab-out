@@ -845,7 +845,6 @@ header {
 }
 
 .needs-review {
-  column-span: all;
   margin-bottom: 14px;
   padding: 10px 14px;
   border: 1px solid rgba(18, 135, 154, 0.24);
