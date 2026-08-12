@@ -267,6 +267,115 @@ async function closeDuplicateTabs(urls, keepOne = true) {
   await fetchOpenTabs();
 }
 
+function getDuplicateTabInfo(tabs) {
+  const urlCounts = new Map();
+  for (const tab of tabs || []) {
+    if (!tab.url) continue;
+    urlCounts.set(tab.url, (urlCounts.get(tab.url) || 0) + 1);
+  }
+
+  const dupeUrls = [];
+  let duplicateCount = 0;
+  for (const [url, count] of urlCounts) {
+    if (count <= 1) continue;
+    dupeUrls.push(url);
+    duplicateCount += count - 1;
+  }
+
+  return { dupeUrls, duplicateCount };
+}
+
+const duplicateReviewKeepTabIds = new Map();
+
+function getDuplicateTabGroups(tabs) {
+  const tabsByUrl = new Map();
+  for (const tab of tabs || []) {
+    if (!tab.url) continue;
+    const matching = tabsByUrl.get(tab.url) || [];
+    matching.push(tab);
+    tabsByUrl.set(tab.url, matching);
+  }
+
+  return [...tabsByUrl.entries()]
+    .filter(([, matching]) => matching.length > 1)
+    .map(([url, matching]) => ({ url, tabs: matching }));
+}
+
+function closeDuplicateReview() {
+  const modal = document.getElementById('duplicateReviewModal');
+  const body = document.getElementById('duplicateReviewBody');
+  if (modal) modal.hidden = true;
+  if (body) body.textContent = '';
+  document.documentElement.classList.remove('duplicate-review-open');
+  duplicateReviewKeepTabIds.clear();
+}
+
+function renderDuplicateReview() {
+  const modal = document.getElementById('duplicateReviewModal');
+  const body = document.getElementById('duplicateReviewBody');
+  if (!modal || !body) return;
+
+  const groups = getDuplicateTabGroups(getRealTabs());
+  if (groups.length === 0) {
+    closeDuplicateReview();
+    return;
+  }
+
+  const duplicateCount = groups.reduce((total, group) => total + group.tabs.length - 1, 0);
+  body.innerHTML = `
+    <p class="duplicate-review-summary"><strong>${duplicateCount} extra tab${duplicateCount !== 1 ? 's' : ''} to review</strong><span>Choose one tab to keep in each group, then close the extras yourself.</span></p>
+    <div class="duplicate-review-groups">
+      ${groups.map(group => {
+        const previousKeepId = duplicateReviewKeepTabIds.get(group.url);
+        const keepTab = group.tabs.find(tab => String(tab.id) === previousKeepId)
+          || group.tabs.find(tab => tab.active)
+          || group.tabs[0];
+        duplicateReviewKeepTabIds.set(group.url, String(keepTab.id));
+
+        const title = cleanTitle(smartTitle(group.tabs[0].title, group.url));
+        return `
+          <section class="duplicate-review-group">
+            <div class="duplicate-review-group-header">
+              <strong>${escapeHtml(title)}</strong>
+              <span>${group.tabs.length} copies</span>
+            </div>
+            <div class="duplicate-review-url">${escapeHtml(group.url)}</div>
+            <div class="duplicate-review-tabs">
+              ${group.tabs.map(tab => {
+                const isKeep = String(tab.id) === String(keepTab.id);
+                const tabTitle = cleanTitle(smartTitle(tab.title, tab.url));
+                const safeTabId = escapeHtml(tab.id);
+                const safeUrl = escapeHtml(encodeURIComponent(group.url));
+                return `
+                  <div class="duplicate-review-tab ${isKeep ? 'is-keep' : ''}">
+                    <div class="duplicate-review-tab-copy">
+                      <strong>${escapeHtml(tabTitle)}</strong>
+                      <span>${tab.active ? 'Active tab' : `Window ${escapeHtml(tab.windowId)}`}</span>
+                    </div>
+                    <div class="duplicate-review-tab-actions">
+                      <button class="action-btn ${isKeep ? 'primary' : ''}" data-action="keep-duplicate-tab" data-tab-id="${safeTabId}" data-duplicate-url="${safeUrl}" aria-pressed="${isKeep}" aria-label="Keep tab: ${escapeHtml(tabTitle)}">${isKeep ? 'Keeping' : 'Keep this'}</button>
+                      ${isKeep ? '' : `<button class="action-btn danger" data-action="close-duplicate-tab" data-tab-id="${safeTabId}" data-duplicate-url="${safeUrl}" aria-label="Close duplicate tab: ${escapeHtml(tabTitle)}">Close</button>`}
+                    </div>
+                  </div>`;
+              }).join('')}
+            </div>
+          </section>`;
+      }).join('')}
+    </div>`;
+  document.documentElement.classList.add('duplicate-review-open');
+  modal.hidden = false;
+}
+
+async function openDuplicateReview() {
+  await fetchOpenTabs();
+  if (getDuplicateTabGroups(getRealTabs()).length === 0) {
+    renderOpenTabsSectionCount();
+    showToast('No duplicates found');
+    return;
+  }
+  renderDuplicateReview();
+}
+
 function canFreeMemoryFromTab(tab) {
   return Boolean(
     tab &&
@@ -1349,9 +1458,14 @@ function renderOpenTabsSectionCount() {
     'free-memory-all',
     (count) => `Sleep ${count} inactive tab${count !== 1 ? 's' : ''}`
   );
+  const { duplicateCount } = getDuplicateTabInfo(realTabs);
+  const globalDeduplicateButton = duplicateCount > 0
+    ? `<button class="action-btn" data-action="dedup-all-keep-one">Review ${duplicateCount} duplicate${duplicateCount !== 1 ? 's' : ''}</button>`
+    : '';
   openTabsSectionCount.innerHTML = [
     `${domainGroups.length} domain${domainGroups.length !== 1 ? 's' : ''}`,
     globalFreeMemoryButton,
+    globalDeduplicateButton,
   ].filter(Boolean).join(' &nbsp;&middot;&nbsp; ');
 }
 
@@ -1863,6 +1977,38 @@ document.addEventListener('click', async (e) => {
     } catch {
       showToast('Could not snooze this reminder');
     }
+    return;
+  }
+
+  if (action === 'dedup-all-keep-one') {
+    await openDuplicateReview();
+    return;
+  }
+
+  if (action === 'close-duplicate-review') {
+    closeDuplicateReview();
+    return;
+  }
+
+  if (action === 'keep-duplicate-tab') {
+    const url = decodeURIComponent(actionEl.dataset.duplicateUrl || '');
+    if (!url || !actionEl.dataset.tabId) return;
+    duplicateReviewKeepTabIds.set(url, actionEl.dataset.tabId);
+    renderDuplicateReview();
+    return;
+  }
+
+  if (action === 'close-duplicate-tab') {
+    const url = decodeURIComponent(actionEl.dataset.duplicateUrl || '');
+    const tabId = Number(actionEl.dataset.tabId);
+    const keepTabId = duplicateReviewKeepTabIds.get(url);
+    if (!url || !Number.isFinite(tabId) || String(tabId) === keepTabId) return;
+
+    await chrome.tabs.remove(tabId);
+    await fetchOpenTabs();
+    renderDuplicateReview();
+    void renderDashboard();
+    showToast('Closed duplicate tab');
     return;
   }
 

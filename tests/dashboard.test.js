@@ -132,6 +132,39 @@ describe('new tab dashboard seam', () => {
     expect(page.getByRole('button', { name: /Sleep 1 inactive tab/i })).toBeTruthy();
   });
 
+  test('opens a duplicate review dialog and lets the user close one extra tab at a time', async () => {
+    const { chrome, document } = await loadDashboard({
+      tabs: [
+        tab({ id: 1, url: 'https://alpha.test/article', title: 'Alpha article' }),
+        tab({ id: 2, url: 'https://alpha.test/article', title: 'Alpha article', active: true }),
+        tab({ id: 3, url: 'https://beta.test/research', title: 'Beta research' }),
+        tab({ id: 4, url: 'https://beta.test/research', title: 'Beta research' }),
+        tab({ id: 5, url: 'https://beta.test/research', title: 'Beta research' }),
+        tab({ id: 6, url: 'https://gamma.test/unique', title: 'Gamma note' }),
+      ],
+    });
+    const page = within(document.body);
+
+    fireEvent.click(page.getByRole('button', { name: /Review 3 duplicates/i }));
+    await flushAsyncWork();
+
+    const dialog = page.getByRole('dialog', { name: /review duplicate tabs/i });
+    expect(within(dialog).getByText('3 extra tabs to review')).toBeTruthy();
+    expect(within(dialog).getAllByText('Alpha article').length).toBeGreaterThan(0);
+
+    const alphaKeepButton = within(dialog)
+      .getAllByRole('button', { name: /Keep tab: Alpha article/i })
+      .find(button => button.getAttribute('aria-pressed') === 'false');
+    fireEvent.click(alphaKeepButton);
+    await flushAsyncWork();
+
+    fireEvent.click(within(page.getByRole('dialog', { name: /review duplicate tabs/i })).getByRole('button', { name: /Close duplicate tab: Alpha article/i }));
+    await flushAsyncWork();
+
+    expect(chrome.tabs.remove).toHaveBeenCalledWith(2);
+    expect(within(page.getByRole('dialog', { name: /review duplicate tabs/i })).getByText('2 extra tabs to review')).toBeTruthy();
+  });
+
   test('sleep actions optimistically keep earlier tabs sleeping across later tab fetches', async () => {
     vi.useFakeTimers({ now: new Date('2026-07-05T12:00:00Z') });
     const { chrome, document } = await loadDashboard({

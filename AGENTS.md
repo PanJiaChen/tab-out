@@ -4,6 +4,19 @@ You're installing **Tab Out** for the user. Your job is not just to set it up --
 
 ---
 
+## UI completion gate
+
+For every visible or interaction change:
+
+1. Run the relevant automated tests.
+2. Reload the unpacked extension in `chrome://extensions`, then reopen or refresh the Tab Out new-tab page.
+3. Exercise the exact affected flow in real Chrome with pointer, keyboard, and scrolling as applicable. Responsive changes must be checked at both the normal window size and a narrower window size.
+4. Capture a screenshot or recording of the final state and report the exact path exercised.
+
+The work is complete only when both automated checks and the real Chrome flow pass. If the environment cannot control or observe the extension page, report **UI verification blocked** and stop short of claiming the issue is fixed; state the single access or user action needed to finish verification.
+
+---
+
 ## Step 0 -- Introduce the product
 
 Before doing anything technical, tell the user what they're about to get:

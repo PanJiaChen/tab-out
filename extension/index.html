@@ -154,6 +154,19 @@
   <span id="toastText"></span>
 </div>
 
+<div class="duplicate-review-backdrop" id="duplicateReviewModal" hidden>
+  <section class="duplicate-review-dialog" role="dialog" aria-modal="true" aria-labelledby="duplicateReviewTitle">
+    <div class="duplicate-review-header">
+      <div>
+        <p class="duplicate-review-eyebrow">Open tabs</p>
+        <h2 id="duplicateReviewTitle">Review duplicate tabs</h2>
+      </div>
+      <button class="duplicate-review-close" type="button" data-action="close-duplicate-review" aria-label="Close duplicate review">×</button>
+    </div>
+    <div class="duplicate-review-body" id="duplicateReviewBody"></div>
+  </section>
+</div>
+
 <!-- Personal config (gitignored) — defines LOCAL_LANDING_PAGE_PATTERNS etc. -->
 <!-- If the file doesn't exist, that's fine — app.js uses sensible defaults. -->
 <script src="config.local.js" onerror="/* no personal config, that's fine */"></script>
