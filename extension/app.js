@@ -2005,6 +2005,7 @@ document.addEventListener('click', async (e) => {
     if (!url || !Number.isFinite(tabId) || String(tabId) === keepTabId) return;
 
     await chrome.tabs.remove(tabId);
+    playCloseSound();
     await fetchOpenTabs();
     renderDuplicateReview();
     void renderDashboard();

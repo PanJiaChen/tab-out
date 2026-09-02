@@ -46,6 +46,10 @@ async function loadDashboard({ tabs: initialTabs, deferred = [] }) {
   dom.window.setTimeout = globalThis.setTimeout;
   dom.window.clearTimeout = globalThis.clearTimeout;
   dom.window.Date = Date;
+  const audioContext = vi.fn(() => {
+    throw new Error('AudioContext invocation captured by test');
+  });
+  dom.window.AudioContext = audioContext;
 
   let tabs = initialTabs.map(item => ({ ...item }));
   const storage = { deferred };
@@ -93,6 +97,7 @@ async function loadDashboard({ tabs: initialTabs, deferred = [] }) {
   await flushAsyncWork();
 
   return {
+    audioContext,
     chrome,
     document: dom.window.document,
     setTabs(nextTabs) {
@@ -133,7 +138,7 @@ describe('new tab dashboard seam', () => {
   });
 
   test('opens a duplicate review dialog and lets the user close one extra tab at a time', async () => {
-    const { chrome, document } = await loadDashboard({
+    const { audioContext, chrome, document } = await loadDashboard({
       tabs: [
         tab({ id: 1, url: 'https://alpha.test/article', title: 'Alpha article' }),
         tab({ id: 2, url: 'https://alpha.test/article', title: 'Alpha article', active: true }),
@@ -162,6 +167,7 @@ describe('new tab dashboard seam', () => {
     await flushAsyncWork();
 
     expect(chrome.tabs.remove).toHaveBeenCalledWith(2);
+    expect(audioContext).toHaveBeenCalledTimes(1);
     expect(within(page.getByRole('dialog', { name: /review duplicate tabs/i })).getByText('2 extra tabs to review')).toBeTruthy();
   });
 
