@@ -3,11 +3,30 @@ import { fireEvent, within } from '@testing-library/dom';
 import { readFile } from 'node:fs/promises';
 import { JSDOM } from 'jsdom';
 import { URL } from 'node:url';
+import { setImmediate as nextTurn } from 'node:timers/promises';
 
 const indexPath = new URL('../extension/index.html', import.meta.url);
 const appPath = new URL('../extension/app.js', import.meta.url);
 const extensionUrl = 'chrome-extension://tab-out-test/index.html';
 const gib = 1024 ** 3;
+const reviewNow = new Date('2026-09-06T12:00:00Z');
+
+function staleTab(id, overrides = {}) {
+  return tab({ id, url: `https://review.test/page-${id}`, title: `Review page ${id}`, index: id - 1,
+    lastAccessed: reviewNow.getTime() - 20 * 86400000, ...overrides });
+}
+
+function expandReview(document, label = 'Review Test') {
+  const queue = within(document.body).getByRole('region', { name: /needs review/i });
+  const show = within(queue).queryByRole('button', { name: 'Show Needs review' });
+  if (show) fireEvent.click(show);
+  fireEvent.click(within(document.body).getByRole('button', { name: `Review ${label}` }));
+}
+
+async function actOnReview(document, id, action) {
+  fireEvent.click(within(document.querySelector(`[data-review-row-id="${id}"]`)).getByRole('button', { name: action }));
+  await flushAsyncWork();
+}
 
 afterEach(() => {
   vi.useRealTimers();
@@ -15,7 +34,7 @@ afterEach(() => {
 });
 
 async function flushAsyncWork() {
-  for (let i = 0; i < 20; i += 1) await Promise.resolve();
+  await nextTurn();
 }
 
 function tab(overrides) {
@@ -52,7 +71,8 @@ async function loadDashboard({ tabs: initialTabs, deferred = [] }) {
   dom.window.AudioContext = audioContext;
 
   let tabs = initialTabs.map(item => ({ ...item }));
-  const storage = { deferred };
+  let nextTabId = Math.max(0, ...tabs.map(item => item.id)) + 1;
+  const storage = { deferred: structuredClone(deferred) };
   const chrome = {
     runtime: { id: 'tab-out-test' },
     tabs: {
@@ -62,16 +82,27 @@ async function loadDashboard({ tabs: initialTabs, deferred = [] }) {
         const ids = Array.isArray(tabIds) ? tabIds : [tabIds];
         tabs = tabs.filter(item => !ids.includes(item.id));
       }),
-      update: vi.fn(async () => {}),
+      update: vi.fn(async (id, patch) => {
+        const current = tabs.find(item => item.id === id);
+        if (patch.active) tabs.filter(item => item.windowId === current.windowId).forEach(item => { item.active = false; });
+        Object.assign(current, patch);
+        return { ...current };
+      }),
+      create: vi.fn(async options => {
+        const created = tab({ id: nextTabId++, ...options, title: options.url, lastAccessed: Date.now() });
+        tabs.push(created);
+        return { ...created };
+      }),
     },
     windows: {
       getCurrent: vi.fn(async () => ({ id: 1 })),
+      get: vi.fn(async id => ({ id })),
       update: vi.fn(async () => {}),
     },
     storage: {
       local: {
-        get: vi.fn(async key => ({ [key]: storage[key] || [] })),
-        set: vi.fn(async patch => Object.assign(storage, patch)),
+        get: vi.fn(async key => structuredClone({ [key]: storage[key] || [] })),
+        set: vi.fn(async patch => Object.assign(storage, structuredClone(patch))),
       },
     },
     system: {
@@ -99,6 +130,7 @@ async function loadDashboard({ tabs: initialTabs, deferred = [] }) {
   return {
     audioContext,
     chrome,
+    storage,
     document: dom.window.document,
     setTabs(nextTabs) {
       tabs = nextTabs.map(item => ({ ...item }));
@@ -277,7 +309,7 @@ describe('new tab dashboard seam', () => {
     expect(document.querySelector('.domain-card') === firstDomainCard).toBe(true);
   });
 
-  test('reviews and snoozes only the stale tabs shown for a domain', async () => {
+  test('expands stale tabs inline and keeps a single URL for 30 days', async () => {
     vi.useFakeTimers({ now: new Date('2026-07-05T12:00:00Z') });
     const { chrome, document } = await loadDashboard({
       tabs: [
@@ -295,24 +327,22 @@ describe('new tab dashboard seam', () => {
     fireEvent.click(within(reviewQueue).getByRole('button', { name: /review figma/i }));
     await flushAsyncWork();
 
-    const figmaCard = document.querySelector('[data-domain-id="domain-www-figma-com"]');
-    expect(figmaCard.classList.contains('is-reviewing')).toBe(true);
-    expect(figmaCard.querySelector('[data-tab-id="1"]').classList.contains('is-review-candidate')).toBe(true);
-    expect(figmaCard.querySelector('[data-tab-id="3"]').classList.contains('is-review-candidate')).toBe(true);
-    expect(figmaCard.querySelector('[data-tab-id="2"]').classList.contains('is-review-candidate')).toBe(false);
+    const expandedReview = page.getByRole('region', { name: /needs review/i });
+    expect(within(expandedReview).getByRole('button', { name: 'Old design' })).toBeTruthy();
+    expect(within(expandedReview).getByRole('button', { name: 'Old flow' })).toBeTruthy();
+    expect(within(expandedReview).queryByRole('button', { name: 'Current design' })).toBeNull();
     expect(document.querySelector('.domain-card') === firstDomainCard).toBe(true);
 
     const refreshedQueue = page.getByRole('region', { name: /needs review/i });
-    const snoozeButton = within(refreshedQueue).getByRole('button', { name: /snooze figma for 30 days/i });
-    expect(snoozeButton.textContent).toMatch(/Snooze 30 days/);
+    const snoozeButton = within(refreshedQueue.querySelector('[data-review-row-id="1"]')).getByRole('button', { name: 'Keep 30d' });
     fireEvent.click(snoozeButton);
     await flushAsyncWork();
 
-    expect(page.queryByRole('region', { name: /needs review/i })).toBeNull();
+    expect(within(page.getByRole('region', { name: /needs review/i })).queryByRole('button', { name: 'Old design' })).toBeNull();
+    expect(within(page.getByRole('region', { name: /needs review/i })).getByRole('button', { name: 'Old flow' })).toBeTruthy();
     const [[{ reviewSnoozesByUrl }]] = chrome.storage.local.set.mock.calls.slice(-1);
     expect(Object.keys(reviewSnoozesByUrl).sort()).toEqual([
       'https://www.figma.com/file/old-design',
-      'https://www.figma.com/file/old-flow',
     ].sort());
   });
 
@@ -384,5 +414,183 @@ describe('new tab dashboard seam', () => {
     trigger.dispatchEvent(new document.defaultView.Event('mousedown', { bubbles: true, cancelable: true }));
 
     expect(search.matches(':focus')).toBe(true);
+  });
+});
+
+describe('inline Needs Review actions', () => {
+  test('closes exactly the clicked URL copy and reopens it in its original position', async () => {
+    vi.useFakeTimers({ now: reviewNow });
+    const first = staleTab(1);
+    const second = staleTab(2, { url: first.url, title: 'Second copy', windowId: 2, index: 5 });
+    const { document, chrome } = await loadDashboard({ tabs: [first, second] });
+    expandReview(document);
+    await actOnReview(document, 2, 'Close');
+    expect(chrome.tabs.remove.mock.calls).toEqual([[2]]);
+    expect(document.querySelector('[data-review-row-id="1"]')).toBeTruthy();
+    expect(document.querySelector('[data-review-row-id="2"]')).toBeNull();
+    fireEvent.click(within(document.body).getByRole('button', { name: 'Undo' }));
+    await flushAsyncWork();
+    expect(chrome.tabs.create).toHaveBeenCalledExactlyOnceWith({ url: first.url, windowId: 2, index: 5, active: false });
+    expect(document.querySelector('[data-review-row-id="3"]')).toBeTruthy();
+    expect(within(document.body).queryByRole('button', { name: 'Undo' })).toBeNull();
+  });
+
+  test('focuses the clicked copy by ID without closing either copy', async () => {
+    vi.useFakeTimers({ now: reviewNow });
+    const first = staleTab(1);
+    const { document, chrome } = await loadDashboard({ tabs: [first, staleTab(2, { url: first.url, title: 'Other window', windowId: 2 })] });
+    expandReview(document);
+    fireEvent.click(within(document.body).getByRole('button', { name: 'Other window' }));
+    await flushAsyncWork();
+    expect(chrome.tabs.update).toHaveBeenCalledExactlyOnceWith(2, { active: true });
+    expect(chrome.windows.update).toHaveBeenCalledWith(2, { focused: true });
+    expect(chrome.tabs.remove).not.toHaveBeenCalled();
+  });
+
+  test('keeps all same-URL copies, persists only that URL, and can retry a storage failure', async () => {
+    vi.useFakeTimers({ now: reviewNow });
+    const first = staleTab(1);
+    const { document, chrome, storage } = await loadDashboard({ tabs: [first, staleTab(2, { url: first.url, windowId: 2 }), staleTab(3)] });
+    expandReview(document);
+    chrome.storage.local.set.mockRejectedValueOnce(new Error('Storage unavailable'));
+    await actOnReview(document, 1, 'Keep 30d');
+    expect(document.querySelector('[data-review-row-id="1"]')).toBeTruthy();
+    expect(document.querySelector('[data-review-row-id="2"]')).toBeTruthy();
+    expect(within(document.body).getByRole('alert').textContent).toMatch(/Storage unavailable/);
+    await actOnReview(document, 1, 'Keep 30d');
+    expect(storage.reviewSnoozesByUrl).toEqual({ [first.url]: reviewNow.getTime() + 30 * 86400000 });
+    expect(document.querySelector('[data-review-row-id="1"]')).toBeNull();
+    expect(document.querySelector('[data-review-row-id="2"]')).toBeNull();
+    expect(document.querySelector('[data-review-row-id="3"]')).toBeTruthy();
+    expect(chrome.tabs.remove).not.toHaveBeenCalled();
+  });
+
+  test('does not close a page when saving fails', async () => {
+    vi.useFakeTimers({ now: reviewNow });
+    const { document, chrome, storage } = await loadDashboard({ tabs: [staleTab(1)] });
+    expandReview(document);
+    chrome.storage.local.set.mockRejectedValueOnce(new Error('Quota exceeded'));
+    await actOnReview(document, 1, 'Save & close');
+    expect(chrome.tabs.remove).not.toHaveBeenCalled();
+    expect(storage.deferred).toEqual([]);
+    expect(within(document.body).getByRole('alert').textContent).toMatch(/Quota exceeded/);
+  });
+
+  test('retries a failed close without saving twice and Undo removes only its own new record', async () => {
+    vi.useFakeTimers({ now: reviewNow });
+    const existing = { id: 'old-archive', url: staleTab(1).url, title: 'Archived page', completed: true, savedAt: reviewNow.toISOString() };
+    const { document, chrome, storage } = await loadDashboard({ tabs: [staleTab(1)], deferred: [existing] });
+    expandReview(document);
+    chrome.tabs.remove.mockRejectedValueOnce(new Error('Close failed'));
+    await actOnReview(document, 1, 'Save & close');
+    expect(storage.deferred).toHaveLength(2);
+    expect(within(document.body).getByRole('alert').textContent).toMatch(/Saved, but not closed/);
+    await actOnReview(document, 1, 'Save & close');
+    expect(storage.deferred).toHaveLength(2);
+    fireEvent.click(within(document.body).getByRole('button', { name: 'Undo' }));
+    await flushAsyncWork();
+    expect(storage.deferred).toEqual([existing]);
+    expect(chrome.tabs.create).toHaveBeenCalledTimes(1);
+  });
+
+  test('reuses an existing active saved item and leaves it intact on Undo', async () => {
+    vi.useFakeTimers({ now: reviewNow });
+    const existing = { id: 'existing', url: staleTab(1).url, title: 'Already saved', completed: false, savedAt: reviewNow.toISOString() };
+    const { document, storage } = await loadDashboard({ tabs: [staleTab(1)], deferred: [existing] });
+    expandReview(document);
+    await actOnReview(document, 1, 'Save & close');
+    expect(storage.deferred).toEqual([existing]);
+    fireEvent.click(within(document.body).getByRole('button', { name: 'Undo' }));
+    await flushAsyncWork();
+    expect(storage.deferred).toEqual([existing]);
+  });
+
+  test('retains only the last successful close for ten seconds and falls back when its window is gone', async () => {
+    vi.useFakeTimers({ now: reviewNow });
+    const { document, chrome } = await loadDashboard({ tabs: [staleTab(1), staleTab(2, { windowId: 2 })] });
+    expandReview(document);
+    await actOnReview(document, 1, 'Close');
+    vi.advanceTimersByTime(9000);
+    await actOnReview(document, 2, 'Close');
+    vi.advanceTimersByTime(2000);
+    chrome.windows.get.mockRejectedValueOnce(new Error('No window'));
+    fireEvent.click(within(document.body).getByRole('button', { name: 'Undo' }));
+    await flushAsyncWork();
+    expect(chrome.tabs.create).toHaveBeenCalledExactlyOnceWith({ url: staleTab(2).url, active: false, windowId: 1 });
+    await actOnReview(document, 3, 'Close');
+    vi.advanceTimersByTime(10000);
+    expect(within(document.body).queryByRole('button', { name: 'Undo' })).toBeNull();
+  });
+
+  test('retries Undo after a storage failure without reopening another copy', async () => {
+    vi.useFakeTimers({ now: reviewNow });
+    const { document, chrome, storage } = await loadDashboard({ tabs: [staleTab(1)] });
+    expandReview(document);
+    await actOnReview(document, 1, 'Save & close');
+    chrome.storage.local.set.mockRejectedValueOnce(new Error('Storage offline'));
+    fireEvent.click(within(document.body).getByRole('button', { name: 'Undo' }));
+    await flushAsyncWork();
+    expect(chrome.tabs.create).toHaveBeenCalledTimes(1);
+    expect(storage.deferred).toHaveLength(1);
+    fireEvent.click(within(document.body).getByRole('button', { name: 'Undo' }));
+    await flushAsyncWork();
+    expect(chrome.tabs.create).toHaveBeenCalledTimes(1);
+    expect(storage.deferred).toEqual([]);
+  });
+
+  test('keeps the original three groups and rows across actions, search and collapsing', async () => {
+    vi.useFakeTimers({ now: reviewNow });
+    const tabs = [staleTab(1), staleTab(2, { url: 'https://second.test/a' }), staleTab(3, { url: 'https://third.test/a' }), staleTab(4, { url: 'https://fourth.test/a', lastAccessed: reviewNow.getTime() - 8 * 86400000 })];
+    const { document, setTabs } = await loadDashboard({ tabs });
+    expandReview(document);
+    setTabs([...tabs, staleTab(5, { url: 'https://new.test/a', lastAccessed: reviewNow.getTime() - 40 * 86400000 }), staleTab(6)]);
+    await actOnReview(document, 1, 'Close');
+    let queue = within(document.body).getByRole('region', { name: /needs review/i });
+    expect(within(queue).getByText(/All reviewed. Choose another group/)).toBeTruthy();
+    expect(within(queue).getByRole('button', { name: 'Review Second Test' }).getAttribute('aria-expanded')).toBe('false');
+    expect(queue.querySelector('[data-review-row-id="6"]')).toBeNull();
+    const search = within(document.body).getByRole('searchbox', { name: /Search open tabs/i });
+    fireEvent.input(search, { target: { value: 'anything' } });
+    fireEvent.click(within(document.body).getByRole('button', { name: 'Clear search' }));
+    queue = within(document.body).getByRole('region', { name: /needs review/i });
+    expect([...queue.querySelectorAll('.needs-review-copy strong')].map(item => item.textContent)).toEqual(['Review Test', 'Second Test', 'Third Test']);
+    fireEvent.click(within(queue).getByRole('button', { name: 'Review Second Test' }));
+    queue = within(document.body).getByRole('region', { name: /needs review/i });
+    expect(within(queue).getByRole('button', { name: 'Review page 2' })).toBeTruthy();
+    expect(queue.querySelectorAll('.review-group-body:not([hidden])')).toHaveLength(1);
+  });
+
+  test('refuses to close a candidate whose URL or protected state changed', async () => {
+    vi.useFakeTimers({ now: reviewNow });
+    const { document, chrome, setTabs } = await loadDashboard({ tabs: [staleTab(1)] });
+    expandReview(document);
+    setTabs([staleTab(1, { url: 'https://review.test/unsaved-work' })]);
+    await actOnReview(document, 1, 'Close');
+    expect(chrome.tabs.remove).not.toHaveBeenCalled();
+    expect(within(document.body).getByRole('alert').textContent).toMatch(/navigated elsewhere/);
+    setTabs([staleTab(1, { audible: true })]);
+    await actOnReview(document, 1, 'Save & close');
+    expect(chrome.tabs.remove).not.toHaveBeenCalled();
+    expect(chrome.storage.local.set).not.toHaveBeenCalled();
+  });
+
+  test('prevents double clicks while closing and returns keyboard focus to the group when complete', async () => {
+    vi.useFakeTimers({ now: reviewNow });
+    const { document, chrome } = await loadDashboard({ tabs: [staleTab(1)] });
+    expandReview(document);
+    let finishClose;
+    const remove = chrome.tabs.remove.getMockImplementation();
+    chrome.tabs.remove.mockImplementationOnce(id => new Promise(resolve => { finishClose = async () => { await remove(id); resolve(); }; }));
+    const close = document.querySelector('[data-action="review-close"]');
+    close.focus();
+    fireEvent.click(close);
+    await flushAsyncWork();
+    fireEvent.click(document.querySelector('[data-action="review-close"]'));
+    expect(chrome.tabs.remove).toHaveBeenCalledTimes(1);
+    await finishClose();
+    await flushAsyncWork();
+    expect(document.getElementById('openTabsSection').style.display).toBe('block');
+    expect(document.activeElement.getAttribute('aria-label')).toBe('Collapse Review Test');
+    expect(within(document.body).getByText('All reviewed for now')).toBeTruthy();
   });
 });

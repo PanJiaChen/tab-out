@@ -33,6 +33,14 @@ const freedFeedbackUntilByTabId = new Map();
 let freedFeedbackTimer = null;
 let reviewSnoozesByUrl = {};
 let isNeedsReviewExpanded = false;
+// Membership and order are fixed for this page, including completed groups.
+let reviewSessionGroups = null;
+let reviewSessionWindowIds = [];
+let expandedReviewDomain = null;
+let reviewBusy = false;
+let reviewUndo = null;
+let reviewUndoTimer = null;
+const REVIEW_UNDO_MS = 10_000;
 
 function hasFreedFeedback(tabId, now = Date.now()) {
   const feedbackUntil = freedFeedbackUntilByTabId.get(tabId);
@@ -185,6 +193,7 @@ async function fetchOpenTabs() {
         url:      t.url,
         title:    t.title,
         windowId: t.windowId,
+        index:    t.index,
         active:   t.active,
         audible:  t.audible,
         pinned:   t.pinned,
@@ -412,8 +421,8 @@ async function snoozeReviewUrls(urls, now = Date.now()) {
 
   for (const url of urls) snoozes[url] = until;
 
-  reviewSnoozesByUrl = snoozes;
   await chrome.storage.local.set({ reviewSnoozesByUrl: snoozes });
+  reviewSnoozesByUrl = snoozes;
 }
 
 function isReviewCandidate(tab, now = Date.now()) {
@@ -456,6 +465,180 @@ function formatInactiveDuration(lastAccessed, now = Date.now()) {
 
   const inactiveDays = Math.floor(inactiveHours / 24);
   return `${inactiveDays} day${inactiveDays === 1 ? '' : 's'}`;
+}
+
+function getReviewSessionGroups() {
+  if (reviewSessionGroups === null) {
+    reviewSessionWindowIds = [...new Set(openTabs.map(tab => tab.windowId))];
+    reviewSessionGroups = getNeedsReviewGroups().slice(0, 3).map(({ group, candidates }) => ({
+      domain: group.domain,
+      label: group.label || friendlyDomain(group.domain),
+      candidates: candidates.map(tab => ({ ...tab, handled: false, error: '' })),
+    }));
+  }
+  return reviewSessionGroups;
+}
+
+function getRemainingReviewTabs(group) {
+  return group.candidates.filter(tab => !tab.handled && !(reviewSnoozesByUrl[tab.url] > Date.now()));
+}
+
+function findReviewTab(tabId) {
+  return getReviewSessionGroups().flatMap(group => group.candidates)
+    .find(tab => tab.id === tabId && !tab.handled);
+}
+
+async function getReviewActionTarget(candidate) {
+  const tabs = await chrome.tabs.query({});
+  const current = tabs.find(tab => tab.id === candidate.id);
+  if (!current) {
+    candidate.handled = true;
+    showToast('This tab is already closed');
+    return null;
+  }
+  if (current.url !== candidate.url) throw new Error('This tab has navigated elsewhere. Refresh Tab Out before reviewing it.');
+  if (current.active || current.pinned || current.audible) {
+    throw new Error('This tab is now active, pinned, or playing audio. Try again after its state changes.');
+  }
+  return current;
+}
+
+async function handleReviewAction(action, tabId) {
+  const candidate = findReviewTab(tabId);
+  if (!candidate || reviewBusy) return;
+  const shouldRestoreFocus = document.getElementById('needsReviewMount')?.contains(document.activeElement);
+  reviewBusy = true;
+  candidate.error = '';
+  renderNeedsReviewMount();
+  renderReviewUndo();
+  let saved = false;
+  try {
+    if (action === 'review-keep') {
+      await snoozeReviewUrls([candidate.url]);
+      // Same-URL copies leave every group in this page's snapshot together.
+      for (const group of getReviewSessionGroups()) {
+        for (const tab of group.candidates) {
+          if (tab.url === candidate.url) tab.handled = true;
+        }
+      }
+      showToast('Kept open · same URL hidden from review for 30 days');
+    } else {
+      let target = await getReviewActionTarget(candidate);
+      if (target) {
+        if (action === 'review-save') {
+          const result = await saveTabForLater(target);
+          saved = true;
+          if (result.created) candidate.createdSavedId = result.item.id;
+          // Saving is asynchronous: never close a page that changed meanwhile.
+          target = await getReviewActionTarget(candidate);
+        }
+        if (target) {
+          await chrome.tabs.remove(target.id);
+          candidate.handled = true;
+          setReviewUndo({
+            tab: target,
+            candidate,
+            createdSavedId: action === 'review-save' ? candidate.createdSavedId : null,
+            message: action === 'review-save' ? 'Saved & closed' : 'Tab closed',
+          });
+        }
+      }
+    }
+    await renderStaticDashboard();
+  } catch (error) {
+    candidate.error = `${saved ? 'Saved, but not closed. ' : ''}${error.message || 'Could not complete this action.'} You can retry.`;
+    if (saved) await renderDeferredColumn();
+  } finally {
+    reviewBusy = false;
+    renderNeedsReviewMount();
+    renderReviewUndo();
+    if (shouldRestoreFocus) focusReviewAfterAction(candidate);
+  }
+}
+
+function focusReviewAfterAction(candidate) {
+  const mount = document.getElementById('needsReviewMount');
+  if (!mount) return;
+  // Return keyboard focus to a non-destructive target, never the next Close.
+  const title = mount.querySelector(`[data-action="review-focus"][data-review-tab-id="${candidate.id}"]`);
+  const groupButton = [...mount.querySelectorAll('[data-action="review-tabs"]')]
+    .find(button => decodeURIComponent(button.dataset.reviewDomain) === expandedReviewDomain);
+  (title || groupButton || mount.querySelector('.needs-review-toggle'))?.focus({ preventScroll: true });
+}
+
+function setReviewUndo(operation) {
+  clearTimeout(reviewUndoTimer);
+  reviewUndo = { ...operation, expiresAt: Date.now() + REVIEW_UNDO_MS, restoredTab: null };
+  reviewUndoTimer = setTimeout(() => {
+    if (!reviewBusy) reviewUndo = null;
+    renderReviewUndo();
+  }, REVIEW_UNDO_MS);
+  renderReviewUndo();
+}
+
+function renderReviewUndo() {
+  const toast = document.getElementById('reviewUndoToast');
+  if (!toast) return;
+  if (reviewUndo && !reviewBusy && Date.now() >= reviewUndo.expiresAt) reviewUndo = null;
+  toast.hidden = !reviewUndo;
+  toast.classList.toggle('visible', Boolean(reviewUndo));
+  if (!reviewUndo) return;
+  document.getElementById('reviewUndoText').textContent = reviewUndo.message;
+  document.getElementById('reviewUndoButton').disabled = reviewBusy;
+}
+
+async function undoReviewAction() {
+  const operation = reviewUndo;
+  if (!operation || reviewBusy || Date.now() >= operation.expiresAt) return;
+  reviewBusy = true;
+  renderNeedsReviewMount();
+  renderReviewUndo();
+  try {
+    if (!operation.restoredTab) {
+      let originalWindowExists = true;
+      try {
+        await chrome.windows.get(operation.tab.windowId);
+      } catch {
+        originalWindowExists = false;
+      }
+      const destination = originalWindowExists
+        ? { windowId: operation.tab.windowId, ...(Number.isInteger(operation.tab.index) ? { index: operation.tab.index } : {}) }
+        : { windowId: (await chrome.windows.getCurrent()).id };
+      operation.restoredTab = await chrome.tabs.create({ url: operation.tab.url, active: false, ...destination });
+      Object.assign(operation.candidate, {
+        id: operation.restoredTab.id,
+        windowId: operation.restoredTab.windowId,
+        index: operation.restoredTab.index,
+        lastAccessed: operation.restoredTab.lastAccessed || Date.now(),
+        handled: false,
+        error: '',
+      });
+    }
+    if (operation.createdSavedId) {
+      await updateSavedTabs(deferred => {
+        const index = deferred.findIndex(item => item.id === operation.createdSavedId);
+        if (index !== -1) deferred.splice(index, 1);
+      });
+      operation.candidate.createdSavedId = null;
+    }
+    reviewUndo = null;
+    clearTimeout(reviewUndoTimer);
+    showToast('Tab reopened');
+    await renderStaticDashboard();
+  } catch (error) {
+    // A retry after a storage failure only removes our saved record; it never opens another copy.
+    operation.message = operation.restoredTab
+      ? 'Tab reopened; saved copy could not be removed. Retry Undo.'
+      : 'Could not reopen tab. Retry Undo.';
+    console.warn('[tab-out] Undo failed:', error);
+    if (operation.restoredTab) await renderStaticDashboard();
+    if (Date.now() >= operation.expiresAt) showToast(operation.restoredTab ? 'Tab reopened; saved copy kept' : 'Could not reopen tab');
+  } finally {
+    reviewBusy = false;
+    renderNeedsReviewMount();
+    renderReviewUndo();
+    focusReviewAfterAction(operation.candidate);
+  }
 }
 
 function markTabsAsSleeping(tabIds) {
@@ -556,17 +739,38 @@ async function closeTabOutDupes() {
  * Saves a single tab to the "Saved for Later" list in chrome.storage.local.
  * @param {{ url: string, title: string }} tab
  */
+let savedTabsWriteQueue = Promise.resolve();
+
+function updateSavedTabs(update) {
+  const write = async () => {
+    const { deferred = [] } = await chrome.storage.local.get('deferred');
+    const result = update(deferred);
+    await chrome.storage.local.set({ deferred });
+    return result;
+  };
+  // Web Locks serialize read/modify/write across multiple Tab Out pages.
+  const operation = savedTabsWriteQueue.then(() => navigator.locks
+    ? navigator.locks.request('tab-out-saved-tabs', write)
+    : write());
+  savedTabsWriteQueue = operation.catch(() => {});
+  return operation;
+}
+
 async function saveTabForLater(tab) {
-  const { deferred = [] } = await chrome.storage.local.get('deferred');
-  deferred.push({
-    id:        Date.now().toString(),
-    url:       tab.url,
-    title:     tab.title,
-    savedAt:   new Date().toISOString(),
-    completed: false,
-    dismissed: false,
+  return updateSavedTabs(deferred => {
+    const existing = deferred.find(item => item.url === tab.url && !item.completed && !item.dismissed);
+    if (existing) return { item: existing, created: false };
+    const item = {
+      id:        crypto.randomUUID(),
+      url:       tab.url,
+      title:     tab.title,
+      savedAt:   new Date().toISOString(),
+      completed: false,
+      dismissed: false,
+    };
+    deferred.push(item);
+    return { item, created: true };
   });
-  await chrome.storage.local.set({ deferred });
 }
 
 /**
@@ -591,13 +795,13 @@ async function getSavedTabs() {
  * Marks a saved tab as completed (checked off). It moves to the archive.
  */
 async function checkOffSavedTab(id) {
-  const { deferred = [] } = await chrome.storage.local.get('deferred');
-  const tab = deferred.find(t => t.id === id);
-  if (tab) {
-    tab.completed = true;
-    tab.completedAt = new Date().toISOString();
-    await chrome.storage.local.set({ deferred });
-  }
+  await updateSavedTabs(deferred => {
+    const tab = deferred.find(t => t.id === id);
+    if (tab) {
+      tab.completed = true;
+      tab.completedAt = new Date().toISOString();
+    }
+  });
 }
 
 /**
@@ -606,12 +810,10 @@ async function checkOffSavedTab(id) {
  * Marks a saved tab as dismissed (removed from all lists).
  */
 async function dismissSavedTab(id) {
-  const { deferred = [] } = await chrome.storage.local.get('deferred');
-  const tab = deferred.find(t => t.id === id);
-  if (tab) {
-    tab.dismissed = true;
-    await chrome.storage.local.set({ deferred });
-  }
+  await updateSavedTabs(deferred => {
+    const tab = deferred.find(t => t.id === id);
+    if (tab) tab.dismissed = true;
+  });
 }
 
 
@@ -1057,31 +1259,60 @@ function getDomainCardId(domain) {
   return 'domain-' + domain.replace(/[^a-z0-9]/g, '-');
 }
 
+function renderReviewCandidate(tab, group) {
+  const title = tab.title || tab.url;
+  let hostname = '';
+  try { hostname = new URL(tab.url).hostname; } catch {}
+  const hasCopies = group.candidates.some(other => other.id !== tab.id && other.url === tab.url);
+  if (!reviewSessionWindowIds.includes(tab.windowId)) reviewSessionWindowIds.push(tab.windowId);
+  const copyLabel = hasCopies ? ` · Window ${reviewSessionWindowIds.indexOf(tab.windowId) + 1} · Tab ${(tab.index ?? 0) + 1}` : '';
+  const attrs = `data-review-tab-id="${tab.id}" ${reviewBusy ? 'disabled' : ''}`;
+  return `<div class="review-tab" data-review-row-id="${tab.id}">
+    <div class="review-tab-info">
+      <button class="review-tab-title" data-action="review-focus" data-review-tab-id="${tab.id}" title="${escapeHtml(tab.url)}">${escapeHtml(title)}</button>
+      <span class="review-tab-meta">${escapeHtml(hostname)} · Last opened ${formatInactiveDuration(tab.lastAccessed)} ago${escapeHtml(copyLabel)}</span>
+    </div>
+    <div class="review-tab-actions" aria-label="Actions for ${escapeHtml(title)}">
+      <button class="action-btn review-close" data-action="review-close" ${attrs}>Close</button>
+      <button class="action-btn review-save" data-action="review-save" ${attrs}>Save &amp; close</button>
+      <button class="action-btn review-keep" data-action="review-keep" ${attrs}>Keep 30d</button>
+    </div>
+    ${tab.error ? `<p class="review-tab-error" role="alert">${escapeHtml(tab.error)}</p>` : ''}
+  </div>`;
+}
+
 function renderNeedsReview() {
-  const reviewGroups = getNeedsReviewGroups().slice(0, 3);
+  const reviewGroups = getReviewSessionGroups();
   if (reviewGroups.length === 0) return '';
 
   const groupCount = reviewGroups.length;
-  const tabCount = reviewGroups.reduce((total, { candidates }) => total + candidates.length, 0);
-  const summary = `${groupCount} group${groupCount === 1 ? '' : 's'} · ${tabCount} tab${tabCount === 1 ? '' : 's'} need review`;
+  const tabCount = reviewGroups.reduce((total, group) => total + getRemainingReviewTabs(group).length, 0);
+  const summary = tabCount === 0 ? 'All reviewed for now' : `${groupCount} group${groupCount === 1 ? '' : 's'} · ${tabCount} tab${tabCount === 1 ? '' : 's'} need review`;
 
-  const rows = reviewGroups.map(({ group, candidates, oldestLastAccessed }) => {
-    const label = group.label || friendlyDomain(group.domain);
-    const candidateUrls = encodeURIComponent(JSON.stringify(candidates.map(tab => tab.url)));
+  const rows = reviewGroups.map((group, index) => {
+    const { label } = group;
+    const candidates = getRemainingReviewTabs(group);
     const domain = encodeURIComponent(group.domain);
-    const oldestFor = formatInactiveDuration(oldestLastAccessed);
+    const oldestFor = candidates.length ? formatInactiveDuration(Math.min(...candidates.map(tab => tab.lastAccessed))) : '';
     const count = candidates.length;
+    const expanded = expandedReviewDomain === group.domain;
+    const panelId = `review-group-${index}`;
 
     return `
+      <div class="needs-review-group${expanded ? ' is-open' : ''}">
       <div class="needs-review-row">
         <div class="needs-review-copy">
           <strong>${escapeHtml(label)}</strong>
-          <span>${count} tab${count === 1 ? '' : 's'} need review · oldest ${oldestFor}</span>
+          <span>${count ? `${count} tab${count === 1 ? '' : 's'} need review · oldest ${oldestFor}` : 'All reviewed'}</span>
         </div>
         <div class="needs-review-actions">
-          <button class="action-btn review-tabs" data-action="review-tabs" data-review-domain="${escapeHtml(domain)}" aria-label="Review ${escapeHtml(label)}">${ICONS.focus}Review</button>
-          <button class="action-btn snooze-review" data-action="snooze-review-tabs" data-review-urls="${escapeHtml(candidateUrls)}" aria-label="Snooze ${escapeHtml(label)} for 30 days">${ICONS.snooze}Snooze 30 days</button>
+          <button class="action-btn review-tabs" data-action="review-tabs" data-review-domain="${escapeHtml(domain)}" aria-expanded="${expanded}" aria-controls="${panelId}" aria-label="${expanded ? 'Collapse' : 'Review'} ${escapeHtml(label)}">${expanded ? 'Collapse' : 'Review'}</button>
         </div>
+      </div>
+      <div class="review-group-body" id="${panelId}" ${expanded ? '' : 'hidden'}>
+        ${candidates.length ? candidates.map(tab => renderReviewCandidate(tab, group)).join('') : '<p class="review-complete" role="status">All reviewed. Choose another group when you are ready.</p>'}
+        ${candidates.length ? '<p class="review-hint">Keep 30d leaves tabs open and hides the same URL from review for 30 days.</p>' : ''}
+      </div>
       </div>`;
   }).join('');
 
@@ -1101,11 +1332,20 @@ function renderNeedsReview() {
     </section>`;
 }
 
-function renderNeedsReviewMount({ hidden = false } = {}) {
+function renderNeedsReviewMount({ hidden = Boolean(getTabSearchQuery()) } = {}) {
   const needsReviewMount = document.getElementById('needsReviewMount');
   if (!needsReviewMount) return;
 
+  const focused = needsReviewMount.contains(document.activeElement) ? document.activeElement : null;
+  const focusKey = focused ? { ...focused.dataset } : null;
   needsReviewMount.innerHTML = hidden ? '' : renderNeedsReview();
+  if (focusKey && !hidden) {
+    [...needsReviewMount.querySelectorAll('button')].find(button =>
+      button.dataset.action === focusKey.action &&
+      button.dataset.reviewTabId === focusKey.reviewTabId &&
+      button.dataset.reviewDomain === focusKey.reviewDomain
+    )?.focus({ preventScroll: true });
+  }
 }
 
 
@@ -1371,7 +1611,7 @@ function renderOpenTabsView() {
   const openTabsSectionTitle = document.getElementById('openTabsSectionTitle');
   if (!openTabsSection || !openTabsMissionsEl) return;
 
-  if (domainGroups.length === 0) {
+  if (domainGroups.length === 0 && getReviewSessionGroups().length === 0) {
     openTabsSection.style.display = 'none';
     return;
   }
@@ -1385,36 +1625,6 @@ function renderOpenTabsView() {
     ? renderTabSearchResults(query)
     : domainGroups.map(g => renderDomainCard(g)).join('');
   openTabsSection.style.display = 'block';
-}
-
-function focusNeedsReviewGroup(domain) {
-  const group = domainGroups.find(candidate => candidate.domain === domain);
-  if (!group) return;
-
-  const reviewTabIds = new Set(
-    group.tabs.filter(tab => isReviewCandidate(tab)).map(tab => String(tab.id))
-  );
-  if (reviewTabIds.size === 0) return;
-
-  const card = document.querySelector(`[data-domain-id="${getDomainCardId(domain)}"]`);
-  if (!card) return;
-
-  const overflow = card.querySelector('.page-chips-overflow');
-  if (overflow) overflow.style.display = 'contents';
-  card.querySelector('.page-chip-overflow')?.remove();
-
-  card.classList.add('is-reviewing');
-  card.querySelectorAll('.page-chip[data-tab-id]').forEach(chip => {
-    chip.classList.toggle('is-review-candidate', reviewTabIds.has(chip.dataset.tabId));
-  });
-  card.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
-
-  setTimeout(() => {
-    card.classList.remove('is-reviewing');
-    card.querySelectorAll('.page-chip.is-review-candidate').forEach(chip => {
-      chip.classList.remove('is-review-candidate');
-    });
-  }, 4000);
 }
 
 function updateTabChipState(chip, tab) {
@@ -1680,6 +1890,12 @@ async function renderDeferredColumn() {
  * Builds HTML for one active checklist item: checkbox, title link,
  * domain, time ago, dismiss button.
  */
+function savedLinkUrl(url) {
+  try {
+    return ['http:', 'https:', 'file:'].includes(new URL(url).protocol) ? escapeHtml(url) : '#';
+  } catch { return '#'; }
+}
+
 function renderDeferredItem(item) {
   let domain = '';
   try { domain = new URL(item.url).hostname.replace(/^www\./, ''); } catch {}
@@ -1687,18 +1903,18 @@ function renderDeferredItem(item) {
   const ago = timeAgo(item.savedAt);
 
   return `
-    <div class="deferred-item" data-deferred-id="${item.id}">
-      <input type="checkbox" class="deferred-checkbox" data-action="check-deferred" data-deferred-id="${item.id}">
+    <div class="deferred-item" data-deferred-id="${escapeHtml(item.id)}">
+      <input type="checkbox" class="deferred-checkbox" data-action="check-deferred" data-deferred-id="${escapeHtml(item.id)}">
       <div class="deferred-info">
-        <a href="${item.url}" target="_blank" rel="noopener" class="deferred-title" title="${(item.title || '').replace(/"/g, '&quot;')}">
-          <img src="${faviconUrl}" alt="" style="width:14px;height:14px;vertical-align:-2px;margin-right:4px" onerror="this.style.display='none'">${item.title || item.url}
+        <a href="${savedLinkUrl(item.url)}" target="_blank" rel="noopener" class="deferred-title" title="${escapeHtml(item.title || '')}">
+          <img src="${escapeHtml(faviconUrl)}" alt="" style="width:14px;height:14px;vertical-align:-2px;margin-right:4px">${escapeHtml(item.title || item.url)}
         </a>
         <div class="deferred-meta">
-          <span>${domain}</span>
+          <span>${escapeHtml(domain)}</span>
           <span>${ago}</span>
         </div>
       </div>
-      <button class="deferred-dismiss" data-action="dismiss-deferred" data-deferred-id="${item.id}" title="Dismiss">
+      <button class="deferred-dismiss" data-action="dismiss-deferred" data-deferred-id="${escapeHtml(item.id)}" title="Dismiss">
         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
       </button>
     </div>`;
@@ -1713,8 +1929,8 @@ function renderArchiveItem(item) {
   const ago = item.completedAt ? timeAgo(item.completedAt) : timeAgo(item.savedAt);
   return `
     <div class="archive-item">
-      <a href="${item.url}" target="_blank" rel="noopener" class="archive-item-title" title="${(item.title || '').replace(/"/g, '&quot;')}">
-        ${item.title || item.url}
+      <a href="${savedLinkUrl(item.url)}" target="_blank" rel="noopener" class="archive-item-title" title="${escapeHtml(item.title || '')}">
+        ${escapeHtml(item.title || item.url)}
       </a>
       <span class="archive-item-date">${ago}</span>
     </div>`;
@@ -1963,20 +2179,34 @@ document.addEventListener('click', async (e) => {
 
   if (action === 'review-tabs') {
     const domain = decodeURIComponent(actionEl.dataset.reviewDomain || '');
-    focusNeedsReviewGroup(domain);
+    expandedReviewDomain = expandedReviewDomain === domain ? null : domain;
+    renderNeedsReviewMount();
     return;
   }
 
-  if (action === 'snooze-review-tabs') {
+  if (action === 'review-focus') {
+    const candidate = findReviewTab(Number(actionEl.dataset.reviewTabId));
+    if (!candidate) return;
     try {
-      const urls = JSON.parse(decodeURIComponent(actionEl.dataset.reviewUrls || ''));
-      if (!Array.isArray(urls) || urls.length === 0) return;
-      await snoozeReviewUrls(urls);
-      renderOpenTabsView();
-      showToast('Review reminder snoozed for 30 days');
-    } catch {
-      showToast('Could not snooze this reminder');
+      const tabs = await chrome.tabs.query({});
+      const target = tabs.find(tab => tab.id === candidate.id && tab.url === candidate.url);
+      if (!target) throw new Error('This tab has changed or closed. Refresh Tab Out to update the list.');
+      await chrome.tabs.update(target.id, { active: true });
+      await chrome.windows.update(target.windowId, { focused: true });
+    } catch (error) {
+      candidate.error = error.message || 'Could not open this tab. Try again.';
+      renderNeedsReviewMount();
     }
+    return;
+  }
+
+  if (['review-close', 'review-save', 'review-keep'].includes(action)) {
+    await handleReviewAction(action, Number(actionEl.dataset.reviewTabId));
+    return;
+  }
+
+  if (action === 'undo-review') {
+    await undoReviewAction();
     return;
   }
 
