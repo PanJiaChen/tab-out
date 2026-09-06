@@ -470,7 +470,7 @@ function formatInactiveDuration(lastAccessed, now = Date.now()) {
 function getReviewSessionGroups() {
   if (reviewSessionGroups === null) {
     reviewSessionWindowIds = [...new Set(openTabs.map(tab => tab.windowId))];
-    reviewSessionGroups = getNeedsReviewGroups().slice(0, 3).map(({ group, candidates }) => ({
+    reviewSessionGroups = getNeedsReviewGroups().slice(0, 6).map(({ group, candidates }) => ({
       domain: group.domain,
       label: group.label || friendlyDomain(group.domain),
       candidates: candidates.map(tab => ({ ...tab, handled: false, error: '' })),

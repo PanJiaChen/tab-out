@@ -49,7 +49,7 @@ The `⌘K` / `Ctrl+K` keyboard command that moves focus to Tab Search when the u
 _Avoid_: global Chrome shortcut, browser command
 
 **Needs Review**:
-A compact, local queue of up to three domain or custom groups that contain tabs not activated for at least seven days. It helps users review stale work, not identify memory-heavy tabs or trigger automatic cleanup.
+A compact, local queue of up to six domain or custom groups that contain tabs not activated for at least seven days. It helps users review stale work, not identify memory-heavy tabs or trigger automatic cleanup.
 _Avoid_: automatic sleep recommendation, high-memory alert, stale domain
 
 **Review Candidate**:
@@ -65,7 +65,7 @@ _Avoid_: inactive group, safe-to-close tab, unimportant tab
 - Tab Search is always visible in the Open Tabs area and can be focused with `⌘K` / `Ctrl+K`. Search results keep each Tab's focus, save, and close actions, but v1 does not add keyboard result navigation.
 - Needs Review is available only when Chrome supplies `lastAccessed`. It groups individual Review Candidates by domain or configured custom group, excludes Homepages, and ranks groups by their oldest candidate.
 - Needs Review starts collapsed to a one-line local summary. `Review` expands candidates inline, with one group open at a time. Each actual tab has its own row, including same-URL copies, and actions target its tab ID. Clicking a row title switches to that exact tab.
-- A page captures up to three review groups once, after its initial tab and snooze fetch. Membership and order stay stable across search, collapse, and subsequent dashboard renders. Completed groups remain visible; no new groups or rows replace them until the user refreshes or opens a new Tab Out page. Sleeping a tab does not count as reviewing it.
+- A page captures up to six review groups once, after its initial tab and snooze fetch. Membership and order stay stable across search, collapse, and subsequent dashboard renders. Completed groups remain visible; no new groups or rows replace them until the user refreshes or opens a new Tab Out page. Sleeping a tab does not count as reviewing it.
 - Each Review row offers `Close`, `Save & close`, and `Keep 30d`. Successful actions remove the affected rows. Keep leaves tabs open and persists a 30-day snooze for the exact URL, hiding all its copies. A completed group stays expanded until the user chooses another group.
 - Save & close persists first and closes only on success. It reuses an active, non-dismissed Saved for Later record for the same URL; archived records remain unchanged. Failed saves never close a tab, and failed closes retain the saved record with a retry message. Close actions recheck tab identity and active/pinned/audible protection before execution.
 - Review Undo covers only the most recent successful Close or Save & close, for 10 seconds. It reopens the URL in the original window and position without activating it; if that window no longer exists, it uses the current Tab Out window. It restores the review row in its original position. Undo removes only a saved record newly created by the undone action and preserves pre-existing records. It does not restore page runtime or unsaved form state, and does not require the sessions permission.

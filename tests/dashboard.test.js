@@ -346,7 +346,7 @@ describe('new tab dashboard seam', () => {
     ].sort());
   });
 
-  test('shows at most three review groups ordered by their oldest stale tab', async () => {
+  test('shows at most six review groups ordered by their oldest stale tab', async () => {
     vi.useFakeTimers({ now: new Date('2026-07-05T12:00:00Z') });
     const daysAgo = (days) => new Date('2026-07-05T12:00:00Z').getTime() - days * 24 * 60 * 60 * 1000;
     const { document } = await loadDashboard({
@@ -355,6 +355,9 @@ describe('new tab dashboard seam', () => {
         tab({ id: 2, url: 'https://two.test/old', title: 'Two', lastAccessed: daysAgo(9) }),
         tab({ id: 3, url: 'https://three.test/old', title: 'Three', lastAccessed: daysAgo(10) }),
         tab({ id: 4, url: 'https://four.test/old', title: 'Four', lastAccessed: daysAgo(11) }),
+        tab({ id: 5, url: 'https://five.test/old', title: 'Five', lastAccessed: daysAgo(12) }),
+        tab({ id: 6, url: 'https://six.test/old', title: 'Six', lastAccessed: daysAgo(13) }),
+        tab({ id: 7, url: 'https://seven.test/old', title: 'Seven', lastAccessed: daysAgo(14) }),
       ],
     });
     const page = within(document.body);
@@ -363,7 +366,7 @@ describe('new tab dashboard seam', () => {
     const reviewQueue = page.getByRole('region', { name: /needs review/i });
     const labels = [...reviewQueue.querySelectorAll('.needs-review-copy strong')].map(item => item.textContent);
 
-    expect(labels).toEqual(['Four Test', 'Three Test', 'Two Test']);
+    expect(labels).toEqual(['Seven Test', 'Six Test', 'Five Test', 'Four Test', 'Three Test', 'Two Test']);
   });
 
   test('search shows a flat list for case-insensitive terms and restores domain groups when cleared', async () => {
@@ -538,7 +541,7 @@ describe('inline Needs Review actions', () => {
     expect(storage.deferred).toEqual([]);
   });
 
-  test('keeps the original three groups and rows across actions, search and collapsing', async () => {
+  test('keeps the original groups and rows across actions, search and collapsing', async () => {
     vi.useFakeTimers({ now: reviewNow });
     const tabs = [staleTab(1), staleTab(2, { url: 'https://second.test/a' }), staleTab(3, { url: 'https://third.test/a' }), staleTab(4, { url: 'https://fourth.test/a', lastAccessed: reviewNow.getTime() - 8 * 86400000 })];
     const { document, setTabs } = await loadDashboard({ tabs });
@@ -553,7 +556,7 @@ describe('inline Needs Review actions', () => {
     fireEvent.input(search, { target: { value: 'anything' } });
     fireEvent.click(within(document.body).getByRole('button', { name: 'Clear search' }));
     queue = within(document.body).getByRole('region', { name: /needs review/i });
-    expect([...queue.querySelectorAll('.needs-review-copy strong')].map(item => item.textContent)).toEqual(['Review Test', 'Second Test', 'Third Test']);
+    expect([...queue.querySelectorAll('.needs-review-copy strong')].map(item => item.textContent)).toEqual(['Review Test', 'Second Test', 'Third Test', 'Fourth Test']);
     fireEvent.click(within(queue).getByRole('button', { name: 'Review Second Test' }));
     queue = within(document.body).getByRole('region', { name: /needs review/i });
     expect(within(queue).getByRole('button', { name: 'Review page 2' })).toBeTruthy();
